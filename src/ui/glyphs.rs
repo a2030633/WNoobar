@@ -6,6 +6,7 @@ use crate::win32::gdiplus::*;
 
 const WNOOBAR_PNG: &[u8] = include_bytes!("../../assets/icons/wnoobar.png");
 const ANTIGRAVITY_PNG: &[u8] = include_bytes!("../../assets/icons/antigravity.png");
+// 官方正版 Claude Code 经典珊瑚橙太阳花 (Sunburst) 图标
 const CLAUDE_PNG: &[u8] = include_bytes!("../../assets/icons/claude.png");
 const CODEX_PNG: &[u8] = include_bytes!("../../assets/icons/codex.png");
 const CURSOR_PNG: &[u8] = include_bytes!("../../assets/icons/cursor.png");
