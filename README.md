@@ -1,5 +1,4 @@
-# <img width="30" height="30" alt="icon_concept_b_aurora_pill" src="https://github.com/user-attachments/assets/6498ca9c-5363-4add-8dd6-3fb9efd7f760" />
-WNoobar (Windows AI Agent Dynamic Island)
+<img width="30" height="30" alt="icon_concept_b_aurora_pill" src="https://github.com/user-attachments/assets/6498ca9c-5363-4add-8dd6-3fb9efd7f760" /> WNoobar (Windows AI Agent Dynamic Island)
 
 > **Silent by default, Delightful when active.**  
 > 专为 Windows 平台打造的 **AI Agent 原生灵动岛** 悬浮感知组件。
