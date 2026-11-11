@@ -161,47 +161,54 @@ impl ClaudeWatcher {
                         } else if step_updated && track.is_working {
                             // 2. 【节拍 2：执行静默期】
                             let now = Instant::now();
-                            if now.duration_since(track.last_event_time) >= Duration::from_millis(600) {
-                                track.last_event_time = now;
-                                let _ = sender.send(AgentEvent::Working {
-                                    session_id: track.session_id.clone(),
-                                    project_name: track.project_name.clone(),
-                                    role_type: track.role_type.clone(),
-                                    agent_name: track.agent_name.clone(),
-                                    task_summary: track.last_action_desc.clone(),
-                                    step_index: track.last_step_index,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // 3. 【节拍 3：完成交付 (800ms 防抖收敛)】
-                if track.is_working && !track.has_reported_done {
-                    if let Some(finish_time) = track.last_model_finished_time {
-                        if finish_time.elapsed() >= Duration::from_millis(800) {
-                            track.is_working = false;
-                            track.has_reported_done = true;
-                            track.last_model_finished_time = None;
-
-                            let summary = if !track.final_summary_candidate.is_empty() {
-                                track.final_summary_candidate.clone()
-                            } else {
-                                format!("Claude 交付完成 (共 {} 步)", track.last_step_index)
-                            };
-
-                            let duration = track.last_event_time.elapsed().as_secs().max(1);
-                            println!("[Watcher] Claude Task Done: [{}] - {}", track.project_name, summary);
-                            let _ = sender.send(AgentEvent::Done {
+                            track.last_event_time = now;
+                            let _ = sender.send(AgentEvent::Working {
                                 session_id: track.session_id.clone(),
                                 project_name: track.project_name.clone(),
                                 role_type: track.role_type.clone(),
                                 agent_name: track.agent_name.clone(),
-                                summary,
-                                duration_secs: duration,
-                                artifacts_count: 0,
+                                task_summary: track.last_action_desc.clone(),
+                                step_index: track.last_step_index,
                             });
                         }
+                    }
+                }
+
+                // 3. 【节拍 3：完成交付 (800ms 防抖收敛 / 2.5s 静默超时双保险)】
+                if track.is_working && !track.has_reported_done && !track.task_start_pending {
+                    let should_deliver = match track.last_model_finished_time {
+                        Some(finish_time) => finish_time.elapsed() >= Duration::from_millis(800),
+                        None => {
+                            // 静默超时兜底：至少已有总结候选或已有执行步骤，且已静默超过 2.5s
+                            (!track.final_summary_candidate.is_empty() || track.last_step_index > 0)
+                                && track.last_event_time.elapsed() >= Duration::from_millis(2500)
+                        }
+                    };
+
+                    if should_deliver {
+                        track.is_working = false;
+                        track.has_reported_done = true;
+                        track.last_model_finished_time = None;
+
+                        let summary = if !track.final_summary_candidate.is_empty() {
+                            track.final_summary_candidate.clone()
+                        } else if track.last_step_index > 0 {
+                            format!("Claude 交付完成 (共 {} 步)", track.last_step_index)
+                        } else {
+                            "Claude 对话已完成".into()
+                        };
+
+                        let duration = track.last_event_time.elapsed().as_secs().max(1);
+                        println!("[Watcher] Claude Task Done: [{}] - {}", track.project_name, summary);
+                        let _ = sender.send(AgentEvent::Done {
+                            session_id: track.session_id.clone(),
+                            project_name: track.project_name.clone(),
+                            role_type: track.role_type.clone(),
+                            agent_name: track.agent_name.clone(),
+                            summary,
+                            duration_secs: duration,
+                            artifacts_count: 0,
+                        });
                     }
                 }
             }
@@ -309,6 +316,8 @@ impl ClaudeWatcher {
                     track.is_working = true;
                     track.has_reported_done = false;
                     track.last_model_finished_time = None;
+                    track.final_summary_candidate.clear();
+                    track.last_step_index = 0;
                     track.task_summary_pending = format!("收到任务 · {}", Self::truncate(text_content.trim(), 20));
                     track.last_action_desc = "收到新指令 · 正在处理...".into();
                     return true;
@@ -347,9 +356,14 @@ impl ClaudeWatcher {
                     return true;
                 }
 
-                // 收官完成判定
-                if stop_reason == "end_turn" || stop_reason == "stop" {
-                    if !text_candidate.trim().is_empty() {
+                // 收官完成判定：
+                // 1) 只要没有 tool_use 且输出了非空文本（解决第三方中转/VS Code 中没有 stop_reason 的缺陷）
+                // 2) 或者 stop_reason 明确指示为 end_turn / stop
+                let has_text = !text_candidate.trim().is_empty();
+                let is_stopped = stop_reason == "end_turn" || stop_reason == "stop";
+
+                if has_text || is_stopped {
+                    if has_text {
                         track.final_summary_candidate = Self::truncate(text_candidate.trim(), 40);
                     }
                     track.has_reported_done = false;
@@ -358,6 +372,17 @@ impl ClaudeWatcher {
                     return true;
                 }
 
+                false
+            }
+            "mode" => {
+                let mode = val.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+                if mode == "normal" && track.is_working && !track.has_reported_done {
+                    // 当检测到 VS Code 回到 normal 待命状态时，激活防抖完成计时
+                    if track.last_model_finished_time.is_none() {
+                        track.last_model_finished_time = Some(Instant::now());
+                    }
+                    return true;
+                }
                 false
             }
             "progress" | "api-request" => {
@@ -535,5 +560,71 @@ mod tests {
         assert!(ClaudeWatcher::parse_entry(&done_entry, &mut track));
         assert!(track.last_model_finished_time.is_some());
         assert!(track.final_summary_candidate.contains("已成功优化代理路由"));
+    }
+
+    #[test]
+    fn test_claude_parse_text_response_without_stop_reason() {
+        let mut track = ClaudeSessionTrackInfo {
+            session_id: "claude-sess-2".into(),
+            project_name: "agent-go-proxy".into(),
+            role_type: "Claude Code".into(),
+            agent_name: "Claude".into(),
+            file_offset: 0,
+            last_event_time: Instant::now(),
+            last_step_index: 0,
+            last_action_desc: "收到新指令 · 正在处理...".into(),
+            is_working: true,
+            has_reported_done: false,
+            task_start_pending: false,
+            task_summary_pending: "".into(),
+            last_model_finished_time: None,
+            final_summary_candidate: "".into(),
+            done_pending: None,
+        };
+
+        // 模拟 VS Code 中 Claude Code 回复天气问题，无 stop_reason 字段
+        let text_reply_without_stop_reason = json!({
+            "parentUuid": "abc-123",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "我现在无法直接调用实时天气插件，但余杭区预计今天多云转晴。" }
+                ]
+            }
+        });
+
+        assert!(ClaudeWatcher::parse_entry(&text_reply_without_stop_reason, &mut track));
+        assert!(track.last_model_finished_time.is_some());
+        assert!(track.final_summary_candidate.contains("我现在无法直接调用实时天气插件"));
+    }
+
+    #[test]
+    fn test_claude_parse_mode_normal() {
+        let mut track = ClaudeSessionTrackInfo {
+            session_id: "claude-sess-3".into(),
+            project_name: "agent-go-proxy".into(),
+            role_type: "Claude Code".into(),
+            agent_name: "Claude".into(),
+            file_offset: 0,
+            last_event_time: Instant::now(),
+            last_step_index: 1,
+            last_action_desc: "执行中".into(),
+            is_working: true,
+            has_reported_done: false,
+            task_start_pending: false,
+            task_summary_pending: "".into(),
+            last_model_finished_time: None,
+            final_summary_candidate: "".into(),
+            done_pending: None,
+        };
+
+        let mode_entry = json!({
+            "type": "mode",
+            "mode": "normal"
+        });
+
+        assert!(ClaudeWatcher::parse_entry(&mode_entry, &mut track));
+        assert!(track.last_model_finished_time.is_some());
     }
 }
