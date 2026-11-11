@@ -15,7 +15,7 @@ use win32::{GdiplusContext, IslandWindow};
 fn main() {
     println!("==================================================");
     println!("     WNoobar (Windows AI Agent Dynamic Island)    ");
-    println!("           Version 0.5.0 (Three-Beat Rhythm)      ");
+    println!("           Version 1.0.0 (Three-Beat Rhythm)      ");
     println!("==================================================");
 
     // 1. 初始化 Windows GDI+ 原生渲染子系统

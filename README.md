@@ -13,6 +13,19 @@
 
 ---
 
+## 📸 效果演示
+
+| 状态 | 预览 |
+| :--- | :--- |
+| **待命就绪 (Idle)**<br>日常极细贴边微光条，鼠标轻触顶部即展开就绪态胶囊 | ![待命就绪](docs/screenshots/01-idle-ready.png) |
+| **节拍 1 · 启动致意 (Start Pop)**<br>发起新任务时轻盈滑出致意，蓝色星环光晕提示 | ![启动致意](docs/screenshots/02-beat1-started.png) |
+| **节拍 2 · 执行中 (Working)**<br>支持多 Agent 微标识别，悬浮查看实时阶段与进度摘要 | ![执行中](docs/screenshots/03-beat2-working.png) |
+| **节拍 3 · 完成交付 (Done)**<br>任务完成顺滑展开交付卡片，展示摘要、产物数与耗时 | ![完成交付](docs/screenshots/04-beat3-done.png) |
+| **交互确认提醒 (Action Needed)**<br>需要用户决策或授权时亮起琥珀暖橙警示光晕 | ![交互确认](docs/screenshots/05-action-needed.png) |
+| **活跃会话抽屉 (Session Deck)**<br>点击左侧微标或托盘菜单展开多 Agent 会话聚合卡片 | ![会话抽屉](docs/screenshots/06-session-deck.png) |
+
+---
+
 ## ✨ 核心特性
 
 ### 1. 三段式节律交互 (Three-Beat Rhythm)
@@ -87,7 +100,8 @@ cargo build --release
 ### 启动运行
 直接双击运行 `wnoobar.exe` 即可：
 - 无需安装，即开即用；
-- 启动后自动吸附在主显示器顶部中央，并常驻于右下角任务栏托盘。
+- 启动后自动吸附在主显示器顶部中央，并常驻于右下角任务栏托盘；
+- 支持命令行参数 `--demo` 模拟完整三段式节律交互（`wnoobar.exe --demo`）。
 
 ---
 
