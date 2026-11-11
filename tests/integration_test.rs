@@ -146,3 +146,45 @@ fn test_multi_agent_watchers_init() {
     assert!(opencode.is_ok());
 }
 
+#[test]
+fn test_odometer_carousel_lifecycle() {
+    use wnoobar::ui::odometer::OdometerCarousel;
+
+    let mut odo = OdometerCarousel::new();
+
+    // 1. 单会话：不启动轮播
+    assert!(!odo.update(0.1, 1));
+    assert_eq!(odo.active_index, 0);
+
+    // 2. 双会话：进入 3.2s 驻留
+    odo.update(1.0, 2);
+    assert!(!odo.is_rolling);
+    odo.update(2.0, 2);
+    assert!(!odo.is_rolling);
+
+    // 3. 超过 3.2s：触发翻滚
+    assert!(odo.update(0.3, 2));
+    assert!(odo.is_rolling);
+    assert_eq!(odo.active_index, 1);
+    assert_eq!(odo.prev_index, 0);
+
+    // 4. 翻滚半程：验证位移
+    odo.update(0.3, 2); // 0.6s 的一半
+    let (prev_y, curr_y) = odo.offsets(24.0);
+    assert!(prev_y < 0.0); // 向上滚出
+    assert!(curr_y > 0.0); // 向上滚入
+
+    // 5. 翻滚结束：进入落地微弹
+    odo.update(0.4, 2);
+    assert!(!odo.is_rolling);
+    assert!(odo.landing_bounce_time > 0.0);
+    let scale = odo.landing_scale();
+    assert!(scale >= 1.0 && scale <= 1.045);
+
+    // 6. 微弹消退：回到驻留
+    odo.update(0.3, 2);
+    assert_eq!(odo.landing_scale(), 1.0);
+    assert_eq!(odo.active_index, 1);
+}
+
+

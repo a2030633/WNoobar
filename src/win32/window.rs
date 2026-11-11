@@ -27,6 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::core::bus::AgentEvent;
 use crate::core::fsm::{EdgeDockMode, IslandState};
 use crate::ui::capsule::CapsuleRenderer;
+use crate::ui::odometer::{ActiveSessionItem, OdometerCarousel};
 use crate::ui::spring::SpringValue;
 use crate::win32::gdiplus::{
     create_bitmap_from_bytes, GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap,
@@ -100,6 +101,8 @@ struct WindowState {
     is_mouse_over: bool,
     mouse_leave_instant: Option<Instant>,
     recent_sessions: Vec<(String, String, String, String, String)>, // id, project, role, desc, agent
+    active_sessions_pool: Vec<ActiveSessionItem>,
+    odometer: OdometerCarousel,
     tray_icon: HICON,
     taskbar_created_msg: u32,
 }
@@ -287,6 +290,8 @@ impl IslandWindow {
                 is_mouse_over: false,
                 mouse_leave_instant: None,
                 recent_sessions: Vec::new(),
+                active_sessions_pool: Vec::new(),
+                odometer: OdometerCarousel::new(),
                 tray_icon,
                 taskbar_created_msg,
             });
@@ -513,6 +518,26 @@ unsafe extern "system" fn wnd_proc(
                                 state.width_spring.set_target(tw);
                                 state.height_spring.set_target(th);
 
+                                if let Some(item) = state.active_sessions_pool.iter_mut().find(|i| i.session_id == session_id) {
+                                    item.project_name = project_name.clone();
+                                    item.role_type = role_type.clone();
+                                    item.task_summary = task_summary.clone();
+                                    item.agent_name = agent_name.clone();
+                                    item.step_index = 0;
+                                    item.last_update_time = Instant::now();
+                                } else {
+                                    state.active_sessions_pool.push(ActiveSessionItem {
+                                        session_id: session_id.clone(),
+                                        project_name: project_name.clone(),
+                                        role_type: role_type.clone(),
+                                        task_summary: task_summary.clone(),
+                                        agent_name: agent_name.clone(),
+                                        step_index: 0,
+                                        start_time: Instant::now(),
+                                        last_update_time: Instant::now(),
+                                    });
+                                }
+
                                 if let Some(item) = state.recent_sessions.iter_mut().find(|(id, _, _, _, _)| id == &session_id) {
                                     item.1 = project_name;
                                     item.2 = role_type;
@@ -553,6 +578,26 @@ unsafe extern "system" fn wnd_proc(
                                     state.height_spring.set_target(th);
                                 }
 
+                                if let Some(item) = state.active_sessions_pool.iter_mut().find(|i| i.session_id == session_id) {
+                                    item.project_name = project_name.clone();
+                                    item.role_type = role_type.clone();
+                                    item.task_summary = new_desc.clone();
+                                    item.agent_name = agent_name.clone();
+                                    item.step_index = step_index;
+                                    item.last_update_time = Instant::now();
+                                } else {
+                                    state.active_sessions_pool.push(ActiveSessionItem {
+                                        session_id: session_id.clone(),
+                                        project_name: project_name.clone(),
+                                        role_type: role_type.clone(),
+                                        task_summary: new_desc.clone(),
+                                        agent_name: agent_name.clone(),
+                                        step_index,
+                                        start_time: Instant::now(),
+                                        last_update_time: Instant::now(),
+                                    });
+                                }
+
                                 if let Some(item) = state.recent_sessions.iter_mut().find(|(id, _, _, _, _)| id == &session_id) {
                                     item.1 = project_name;
                                     item.2 = role_type;
@@ -584,6 +629,8 @@ unsafe extern "system" fn wnd_proc(
                                 let (tw, th) = state.current_state.target_dimensions(state.dock_mode);
                                 state.width_spring.set_target(tw);
                                 state.height_spring.set_target(th);
+
+                                state.active_sessions_pool.retain(|i| i.session_id != session_id);
 
                                 if let Some(item) = state.recent_sessions.iter_mut().find(|(id, _, _, _, _)| id == &session_id) {
                                     item.1 = project_name;
@@ -636,12 +683,19 @@ unsafe extern "system" fn wnd_proc(
                     let dt = now.duration_since(state.last_frame).as_secs_f32();
                     state.last_frame = now;
 
+                    let odo_anim = state.odometer.update(dt, state.active_sessions_pool.len());
                     let w_anim = state.width_spring.update(dt);
                     let h_anim = state.height_spring.update(dt);
                     state.renderer.update(dt);
 
-                    // 自适应帧率：若处于贴边隐藏且弹簧已完全静止且未悬停，可跳过重绘降低系统消耗
-                    let is_animating = w_anim || h_anim;
+                    // 多会话轮播时，自适应调整胶囊目标尺寸
+                    if state.dock_mode == EdgeDockMode::Normal && state.active_sessions_pool.len() >= 2 {
+                        let ideal_w = 410.0;
+                        state.width_spring.set_target(ideal_w);
+                    }
+
+                    // 自适应帧率：若处于贴边隐藏且弹簧与里程表均已完全静止且未悬停，可跳过重绘降低系统消耗
+                    let is_animating = w_anim || h_anim || odo_anim;
                     let should_render = is_animating
                         || state.dock_mode != EdgeDockMode::Peeking
                         || state.is_mouse_over;
@@ -800,6 +854,8 @@ unsafe fn render_and_update_layered(hwnd: HWND, state: &mut WindowState) {
             &state.current_state,
             state.dock_mode,
             &state.recent_sessions,
+            &state.active_sessions_pool,
+            &state.odometer,
         );
 
         let screen_dc = GetDC(hwnd);

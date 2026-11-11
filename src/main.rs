@@ -96,52 +96,77 @@ fn main() {
         }
     }
 
-    // 4. 如果是 demo 模式，模拟多品牌 AI 助手的三段式节律交互
+    // 4. 如果是 demo 模式，模拟多会话并发里程表垂直滚轮轮播
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|arg| arg == "--demo") {
-        println!("[Demo] Demo mode active: simulating Multi-Agent Three-Beat Rhythm...");
+        println!("[Demo] Demo mode active: simulating Odometer Carousel (WNoobar + QQ-BOT)...");
         let tx_demo = tx.clone();
         thread::spawn(move || {
-            // 品牌 1：Cursor 启动与生成
+            // 会话 1：WNoobar · AI 结对助手 (Antigravity)
             thread::sleep(Duration::from_millis(1000));
             let _ = tx_demo.send(AgentEvent::TaskStarted {
-                session_id: "demo-cursor".into(),
-                project_name: "FrontendApp".into(),
-                role_type: "Cursor Composer".into(),
-                agent_name: "Cursor".into(),
-                task_summary: "Composer 开始生成导航栏组件...".into(),
+                session_id: "demo-s1".into(),
+                project_name: "WNoobar".into(),
+                role_type: "AI 结对助手".into(),
+                agent_name: "Antigravity".into(),
+                task_summary: "收到任务 · 开启多任务并发轮播...".into(),
             });
 
-            thread::sleep(Duration::from_millis(2000));
-            let _ = tx_demo.send(AgentEvent::Done {
-                session_id: "demo-cursor".into(),
-                project_name: "FrontendApp".into(),
-                role_type: "Cursor Composer".into(),
-                agent_name: "Cursor".into(),
-                summary: "组件生成完毕，已自动保存修改".into(),
-                duration_secs: 4,
-                artifacts_count: 1,
-            });
-
-            // 品牌 2：Claude Code 启动与执行
-            thread::sleep(Duration::from_millis(4500));
+            // 会话 2：QQ-BOT · Claude (Claude Code) 同时并发启动！
+            thread::sleep(Duration::from_millis(1200));
             let _ = tx_demo.send(AgentEvent::TaskStarted {
-                session_id: "demo-claude".into(),
-                project_name: "agent-go-proxy".into(),
-                role_type: "Claude Code".into(),
+                session_id: "demo-s2".into(),
+                project_name: "QQ-BOT".into(),
+                role_type: "Claude".into(),
                 agent_name: "Claude".into(),
-                task_summary: "收到任务 · 优化路由与缓存...".into(),
+                task_summary: "收到指令 · 正在处理群消息...".into(),
             });
 
+            // 两大会话并发工作推进步数，触发里程表垂直滚轮换页
+            for step in 1..=8 {
+                thread::sleep(Duration::from_millis(1500));
+                let _ = tx_demo.send(AgentEvent::Working {
+                    session_id: "demo-s1".into(),
+                    project_name: "WNoobar".into(),
+                    role_type: "AI 结对助手".into(),
+                    agent_name: "Antigravity".into(),
+                    task_summary: format!("优化里程表轮播动效与微弹强调 (第 {} 步)", 220 + step),
+                    step_index: 220 + step,
+                });
+
+                thread::sleep(Duration::from_millis(1500));
+                let _ = tx_demo.send(AgentEvent::Working {
+                    session_id: "demo-s2".into(),
+                    project_name: "QQ-BOT".into(),
+                    role_type: "Claude".into(),
+                    agent_name: "Claude".into(),
+                    task_summary: format!("同步 WebSocket 消息流 (第 {} 步)", 15 + step),
+                    step_index: 15 + step,
+                });
+            }
+
+            // 会话 1 率先完成交付
             thread::sleep(Duration::from_millis(2000));
             let _ = tx_demo.send(AgentEvent::Done {
-                session_id: "demo-claude".into(),
-                project_name: "agent-go-proxy".into(),
-                role_type: "Claude Code".into(),
-                agent_name: "Claude".into(),
-                summary: "重构已完成，单元测试 100% 通过".into(),
-                duration_secs: 6,
+                session_id: "demo-s1".into(),
+                project_name: "WNoobar".into(),
+                role_type: "AI 结对助手".into(),
+                agent_name: "Antigravity".into(),
+                summary: "里程表轮播动效系统已全部上线完成！".into(),
+                duration_secs: 15,
                 artifacts_count: 2,
+            });
+
+            // 会话 2 随后完成交付
+            thread::sleep(Duration::from_millis(3500));
+            let _ = tx_demo.send(AgentEvent::Done {
+                session_id: "demo-s2".into(),
+                project_name: "QQ-BOT".into(),
+                role_type: "Claude".into(),
+                agent_name: "Claude".into(),
+                summary: "群消息流连接成功，全部就绪。".into(),
+                duration_secs: 18,
+                artifacts_count: 1,
             });
         });
     }

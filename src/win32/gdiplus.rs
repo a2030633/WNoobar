@@ -81,6 +81,8 @@ unsafe extern "system" {
     pub fn GdipScaleWorldTransform(graphics: *mut c_void, sx: f32, sy: f32, order: i32) -> i32;
     pub fn GdipTranslateWorldTransform(graphics: *mut c_void, dx: f32, dy: f32, order: i32) -> i32;
     pub fn GdipResetWorldTransform(graphics: *mut c_void) -> i32;
+    pub fn GdipSaveGraphics(graphics: *mut c_void, state: *mut u32) -> i32;
+    pub fn GdipRestoreGraphics(graphics: *mut c_void, state: u32) -> i32;
 
     pub fn GdipCreateSolidFill(color: u32, brush: *mut *mut c_void) -> i32;
     pub fn GdipDeleteBrush(brush: *mut c_void) -> i32;

@@ -4,6 +4,7 @@ use std::ptr::null_mut;
 
 use crate::core::fsm::{EdgeDockMode, FlipTransition, IslandState};
 use crate::ui::glyphs::{AgentBrand, GlyphManager};
+use crate::ui::odometer::{ActiveSessionItem, OdometerCarousel};
 use crate::win32::gdiplus::*;
 
 pub struct CapsuleRenderer {
@@ -116,6 +117,8 @@ impl CapsuleRenderer {
         state: &IslandState,
         dock_mode: EdgeDockMode,
         recent_sessions: &[(String, String, String, String, String)], // id, project, role, desc, agent
+        active_sessions: &[ActiveSessionItem],
+        odometer: &OdometerCarousel,
     ) {
         unsafe {
             if graphics.is_null() {
@@ -244,6 +247,9 @@ impl CapsuleRenderer {
 
                 if dock_mode == EdgeDockMode::DeckExpanded {
                     self.render_deck_view(graphics, cap_x, cap_y, cap_w, cap_h, recent_sessions);
+                } else if active_sessions.len() >= 2 && !matches!(state, IslandState::Done { .. } | IslandState::ActionNeeded { .. }) {
+                    // 当处于多会话并发时，自动激活里程表式垂直滚轮换页！
+                    self.render_odometer_view(graphics, cap_x, cap_y, cap_w, cap_h, active_sessions, odometer);
                 } else {
                     match state {
                         IslandState::Idle => {
@@ -390,6 +396,168 @@ impl CapsuleRenderer {
             GdipCreateSolidFill(make_argb(245, 225, 230, 240), &mut desc_brush); // 纯净高对比，告别模糊发虚
             GdipDrawString(graphics, desc_utf16.as_ptr(), desc_utf16.len() as i32 - 1, self.font_body, &desc_rect, self.format_single_line, desc_brush);
             GdipDeleteBrush(desc_brush);
+        }
+    }
+
+    /// 里程表式多会话垂直滚轮轮播主入口
+    unsafe fn render_odometer_view(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sessions: &[ActiveSessionItem],
+        odometer: &OdometerCarousel,
+    ) {
+        unsafe {
+            if sessions.is_empty() {
+                return;
+            }
+
+            let count = sessions.len();
+            let curr_item = &sessions[odometer.active_index % count];
+            let row_height = 24.0; // 垂直滚轮行高
+
+            if odometer.is_rolling {
+                let (prev_offset, curr_offset) = odometer.offsets(row_height);
+                let prev_item = &sessions[odometer.prev_index % count];
+
+                // 1. 向上滚出胶囊顶部的上一会话 (translateY = prev_offset)
+                self.render_odometer_single_row(
+                    graphics, x, y + prev_offset, w, h,
+                    &prev_item.project_name, &prev_item.role_type, &prev_item.agent_name,
+                    &prev_item.task_summary, prev_item.step_index, 1.0,
+                );
+
+                // 2. 从胶囊底部向上滚入的当前会话 (translateY = curr_offset)
+                self.render_odometer_single_row(
+                    graphics, x, y + curr_offset, w, h,
+                    &curr_item.project_name, &curr_item.role_type, &curr_item.agent_name,
+                    &curr_item.task_summary, curr_item.step_index, 1.0,
+                );
+            } else {
+                // 3. 驻留态与卡槽落地微弹强调 (Landing Scale Bounce)
+                let scale = odometer.landing_scale();
+                self.render_odometer_single_row(
+                    graphics, x, y, w, h,
+                    &curr_item.project_name, &curr_item.role_type, &curr_item.agent_name,
+                    &curr_item.task_summary, curr_item.step_index, scale,
+                );
+            }
+        }
+    }
+
+    /// 单行会话内容排版与渲染（支持落地微弹强调）
+    unsafe fn render_odometer_single_row(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        project: &str,
+        role: &str,
+        agent: &str,
+        task_summary: &str,
+        step: u64,
+        scale: f32,
+    ) {
+        unsafe {
+            let mut g_state: u32 = 0;
+            let need_scale = (scale - 1.0).abs() > 0.001;
+
+            if need_scale {
+                GdipSaveGraphics(graphics, &mut g_state);
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                GdipTranslateWorldTransform(graphics, cx, cy, MATRIX_ORDER_PREPEND);
+                GdipScaleWorldTransform(graphics, scale, scale, MATRIX_ORDER_PREPEND);
+                GdipTranslateWorldTransform(graphics, -cx, -cy, MATRIX_ORDER_PREPEND);
+            }
+
+            let brand = AgentBrand::from_name(agent);
+            let glyph_x = (x + 18.0).round();
+            let glyph_y = (y + h / 2.0).round();
+
+            // 绘制专属品牌微标
+            self.glyph_manager.draw(graphics, brand, glyph_x, glyph_y, 18.0, self.pulse_phase);
+
+            let text_y = (y + (h - 18.0) / 2.0).round();
+            let text_h = 18.0;
+
+            // 1. 项目名 (粗体白字，例如 "WNoobar" 或 "QQ-BOT")
+            let proj_name = if project.is_empty() { "WNoobar" } else { project };
+            let proj_utf16: Vec<u16> = format!("{}\0", proj_name).encode_utf16().collect();
+            let mut cur_x = (glyph_x + 14.0).round();
+            let measured_proj_w = Self::measure_text_w(graphics, self.font_title, proj_name, self.format_single_line);
+            let proj_w = measured_proj_w.clamp(20.0, 95.0).round();
+            let proj_rect = RectF { x: cur_x, y: text_y, width: proj_w, height: text_h };
+            let mut proj_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(255, 255, 255, 255), &mut proj_brush);
+            GdipDrawString(graphics, proj_utf16.as_ptr(), proj_utf16.len() as i32 - 1, self.font_title, &proj_rect, self.format_single_line, proj_brush);
+            GdipDeleteBrush(proj_brush);
+            cur_x = (cur_x + proj_w + 6.0).round();
+
+            // 分隔圆点 1
+            let dot_str = "·\0";
+            let dot_utf16: Vec<u16> = dot_str.encode_utf16().collect();
+            let dot_w = 8.0;
+            let dot_rect1 = RectF { x: cur_x, y: text_y, width: dot_w, height: text_h };
+            let mut dot_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(180, 165, 170, 180), &mut dot_brush);
+            GdipDrawString(graphics, dot_utf16.as_ptr(), dot_utf16.len() as i32 - 1, self.font_body, &dot_rect1, self.format_single_line, dot_brush);
+            cur_x = (cur_x + dot_w + 6.0).round();
+
+            // 2. 角色/会话名 (天蓝色)
+            let role_clean = role.trim();
+            let role_utf16: Vec<u16> = format!("{}\0", role_clean).encode_utf16().collect();
+            let measured_role_w = Self::measure_text_w(graphics, self.font_role, role_clean, self.format_single_line);
+            let role_w = measured_role_w.clamp(24.0, 130.0).round();
+            let role_rect = RectF { x: cur_x, y: text_y, width: role_w, height: text_h };
+            let mut role_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(255, 10, 185, 255), &mut role_brush);
+            GdipDrawString(graphics, role_utf16.as_ptr(), role_utf16.len() as i32 - 1, self.font_role, &role_rect, self.format_single_line, role_brush);
+            GdipDeleteBrush(role_brush);
+            cur_x = (cur_x + role_w + 6.0).round();
+
+            // 分隔圆点 2
+            let dot_rect2 = RectF { x: cur_x, y: text_y, width: dot_w, height: text_h };
+            GdipDrawString(graphics, dot_utf16.as_ptr(), dot_utf16.len() as i32 - 1, self.font_body, &dot_rect2, self.format_single_line, dot_brush);
+            cur_x = (cur_x + dot_w + 6.0).round();
+
+            // 3. 步数展示（如果有步数，例如 "第 222 步"，采用等宽数字平稳排版）
+            if step > 0 {
+                let step_str = format!("第 {} 步\0", step);
+                let step_utf16: Vec<u16> = step_str.encode_utf16().collect();
+                let measured_step_w = Self::measure_text_w(graphics, self.font_small, &step_str[..step_str.len() - 1], self.format_single_line);
+                let step_w = measured_step_w.clamp(36.0, 70.0).round();
+                let step_rect = RectF { x: cur_x, y: text_y, width: step_w, height: text_h };
+                let mut step_brush: *mut c_void = null_mut();
+                GdipCreateSolidFill(make_argb(230, 52, 211, 153), &mut step_brush); // 翡翠绿等宽数字
+                GdipDrawString(graphics, step_utf16.as_ptr(), step_utf16.len() as i32 - 1, self.font_small, &step_rect, self.format_single_line, step_brush);
+                GdipDeleteBrush(step_brush);
+                cur_x = (cur_x + step_w + 6.0).round();
+
+                // 分隔圆点 3
+                let dot_rect3 = RectF { x: cur_x, y: text_y, width: dot_w, height: text_h };
+                GdipDrawString(graphics, dot_utf16.as_ptr(), dot_utf16.len() as i32 - 1, self.font_body, &dot_rect3, self.format_single_line, dot_brush);
+                cur_x = (cur_x + dot_w + 6.0).round();
+            }
+            GdipDeleteBrush(dot_brush);
+
+            // 4. 当前指令/进度摘要 (高对比银灰)
+            let desc_utf16: Vec<u16> = format!("{}\0", task_summary).encode_utf16().collect();
+            let remain_w = (x + w - cur_x - 18.0).max(20.0).round();
+            let desc_rect = RectF { x: cur_x, y: text_y, width: remain_w, height: text_h };
+            let mut desc_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(245, 225, 230, 240), &mut desc_brush);
+            GdipDrawString(graphics, desc_utf16.as_ptr(), desc_utf16.len() as i32 - 1, self.font_body, &desc_rect, self.format_single_line, desc_brush);
+            GdipDeleteBrush(desc_brush);
+
+            if need_scale {
+                GdipRestoreGraphics(graphics, g_state);
+            }
         }
     }
 
