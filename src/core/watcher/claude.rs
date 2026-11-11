@@ -34,6 +34,7 @@ pub struct ClaudeSessionTrackInfo {
     pub task_summary_pending: String,
     pub last_model_finished_time: Option<Instant>,
     pub final_summary_candidate: String,
+    pub done_pending: Option<(String, u64)>,
 }
 
 impl ClaudeWatcher {
@@ -99,6 +100,7 @@ impl ClaudeWatcher {
                         task_summary_pending: "收到任务 · 开始处理...".into(),
                         last_model_finished_time: None,
                         final_summary_candidate: String::new(),
+                        done_pending: None,
                     }
                 });
 
@@ -124,8 +126,24 @@ impl ClaudeWatcher {
 
                         track.file_offset = current_len;
 
-                        // 1. 【节拍 1：启动轻弹】
-                        if track.task_start_pending {
+                        // 0. 【立即完成 / 用户中断收敛节拍】
+                        if let Some((summary, duration_secs)) = track.done_pending.take() {
+                            track.is_working = false;
+                            track.has_reported_done = true;
+                            track.last_model_finished_time = None;
+
+                            println!("[Watcher] Claude Task Interrupted/Done: [{}] - {}", track.project_name, summary);
+                            let _ = sender.send(AgentEvent::Done {
+                                session_id: track.session_id.clone(),
+                                project_name: track.project_name.clone(),
+                                role_type: track.role_type.clone(),
+                                agent_name: track.agent_name.clone(),
+                                summary,
+                                duration_secs,
+                                artifacts_count: 0,
+                            });
+                        } else if track.task_start_pending {
+                            // 1. 【节拍 1：启动轻弹】
                             track.task_start_pending = false;
                             track.is_working = true;
                             track.has_reported_done = false;
@@ -278,6 +296,8 @@ impl ClaudeWatcher {
                 }
 
                 if text_content.contains("[Request interrupted by user]") {
+                    let duration = track.last_event_time.elapsed().as_secs().max(1);
+                    track.done_pending = Some(("任务已由用户取消".into(), duration));
                     track.is_working = false;
                     track.has_reported_done = true;
                     track.last_model_finished_time = None;
@@ -387,6 +407,7 @@ mod tests {
             task_summary_pending: "".into(),
             last_model_finished_time: None,
             final_summary_candidate: "".into(),
+            done_pending: None,
         };
 
         let user_entry = json!({
@@ -407,6 +428,44 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_parse_user_interrupted() {
+        let mut track = ClaudeSessionTrackInfo {
+            session_id: "claude-sess-interrupted".into(),
+            project_name: "agent-go-proxy".into(),
+            role_type: "Claude Code".into(),
+            agent_name: "Claude".into(),
+            file_offset: 0,
+            last_event_time: Instant::now(),
+            last_step_index: 2,
+            last_action_desc: "执行中".into(),
+            is_working: true,
+            has_reported_done: false,
+            task_start_pending: false,
+            task_summary_pending: "".into(),
+            last_model_finished_time: None,
+            final_summary_candidate: "".into(),
+            done_pending: None,
+        };
+
+        let interrupt_entry = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "[Request interrupted by user]" }
+                ]
+            }
+        });
+
+        assert!(ClaudeWatcher::parse_entry(&interrupt_entry, &mut track));
+        assert!(track.done_pending.is_some());
+        let (summary, _) = track.done_pending.unwrap();
+        assert_eq!(summary, "任务已由用户取消");
+        assert!(!track.is_working);
+        assert!(track.has_reported_done);
+    }
+
+    #[test]
     fn test_claude_parse_tool_use() {
         let mut track = ClaudeSessionTrackInfo {
             session_id: "claude-sess-1".into(),
@@ -423,6 +482,7 @@ mod tests {
             task_summary_pending: "".into(),
             last_model_finished_time: None,
             final_summary_candidate: "".into(),
+            done_pending: None,
         };
 
         let tool_entry = json!({
@@ -458,6 +518,7 @@ mod tests {
             task_summary_pending: "".into(),
             last_model_finished_time: None,
             final_summary_candidate: "".into(),
+            done_pending: None,
         };
 
         let done_entry = json!({
