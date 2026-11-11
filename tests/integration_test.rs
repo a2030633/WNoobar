@@ -132,3 +132,17 @@ fn test_codex_watcher_init() {
     let watcher = wnoobar::core::watcher::CodexWatcher::new(tx);
     assert!(watcher.is_ok());
 }
+
+#[test]
+fn test_multi_agent_watchers_init() {
+    let (tx, _rx) = unbounded();
+
+    // 验证各 Watcher 的容错初始化
+    let _ = wnoobar::core::watcher::ClaudeWatcher::new(tx.clone());
+    let _ = wnoobar::core::watcher::CursorWatcher::new(tx.clone());
+    let deepseek = wnoobar::core::watcher::DeepSeekWatcher::new(tx.clone());
+    assert!(deepseek.is_ok());
+    let opencode = wnoobar::core::watcher::OpenCodeWatcher::new(tx);
+    assert!(opencode.is_ok());
+}
+

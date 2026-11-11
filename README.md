@@ -7,9 +7,22 @@
 
 ## 📖 项目简介
 
-**WNoobar** 是一款纯血原生、极轻量、高性能的 Windows 桌面灵动岛交互程序。它能在屏幕顶端以优雅的胶囊与流光动画，实时感知并可视化各大 AI Agent（如 **Google Antigravity**、**OpenAI / GitHub Codex**、**Claude Code** 等）的任务生命周期。
+**WNoobar** 是一款纯血原生、极轻量、高性能的 Windows 桌面灵动岛交互程序。它能在屏幕顶端以优雅的胶囊与流光动画，实时感知并可视化主流 AI Agent（**Google Antigravity**、**Claude Code**、**Cursor**、**OpenAI Codex**、**DeepSeek**、**OpenCode** 等）的任务生命周期。
 
-程序基于纯 Rust + Win32 原生分层窗口（Layered Window）与 GDI+ 渲染，不依赖任何重量级 GUI 框架或 Web 容器，编译产物为单一便携 `.exe` 文件（体积小于 1MB），待机 CPU 占用 0.0%，后台静默常驻无任何 CMD 命令行黑框干扰。
+程序基于纯 Rust + Win32 原生分层窗口（Layered Window）与 GDI+ 渲染，不依赖任何重量级 GUI 框架或 Web 容器，编译产物为单一便携 `.exe` 文件（体积仅 ~900KB），待机 CPU 占用 0.0%，后台静默常驻无任何 CMD 命令行黑框干扰。
+
+---
+
+## 🤖 AI Agent 深度适配矩阵
+
+| AI Agent | 官方微标 | 专属光晕配色 | 监听链路与生命周期支持 |
+| :--- | :---: | :---: | :--- |
+| **Google Antigravity** | 极光四角星 | `#5AB4FF` 智蓝光环 | 监听 Brain 实时日志，精准感知任务下发、思考规划、工具调用、Action Needed 交互确认与 Done 交付 |
+| **Claude Code** | 珊瑚微标 | `#D97757` 赤陶橙红 | 监听 `~/.claude/projects/` 会话日志，实时捕获 `tool_use`（Bash/Edit/View）与 `end_turn` 交付 |
+| **Cursor** | 暗夜微标 | `#6366F1` 赛博幻紫 | 监听 `workspaceStorage/` 与 `globalStorage/` 中的 `state.vscdb`，实时追踪 Composer 与 Chat 活跃生命周期 |
+| **OpenAI Codex** | 极客墨绿 | `#10A37F` 极客墨绿 | 监听 `~/.codex/sessions/` 活跃日志，多轮任务启动、执行流与完成闭环检测 |
+| **DeepSeek** | 灵动深海蓝 | `#1E6FFF` 深蓝脉冲 | 深度感知 `<think>` 思考阶段（“深度思考中...”），思考收敛后平滑过渡至交付卡片 |
+| **OpenCode** | 极客双括号 | `#4F46E5` 极客靛蓝 | 监听 `~/.local/share/opencode/storage/`，自动提取项目工程、会话元数据与工具链执行 |
 
 ---
 
@@ -63,7 +76,11 @@ f:\项目\WNoobar
 │   │   ├── fsm/                # 有限状态机 (IslandState, EdgeDockMode)
 │   │   └── watcher/            # 多 Agent 监听驱动引擎
 │   │       ├── antigravity.rs  # Google Antigravity 本地 Brain 日志监听器
-│   │       └── codex.rs        # OpenAI Codex 会话日志管道监听器
+│   │       ├── claude.rs       # Anthropic Claude Code 会话日志监听器
+│   │       ├── codex.rs        # OpenAI Codex 会话日志管道监听器
+│   │       ├── cursor.rs       # Cursor IDE 状态与 Composer 动向监听器
+│   │       ├── deepseek.rs     # DeepSeek 推理引擎与思考流监听器
+│   │       └── opencode.rs     # OpenCode 终端智能体存储监听器
 │   ├── ui/                     # 原生视觉与动效层
 │   │   ├── capsule.rs          # 灵动岛视窗、卡片与抽屉 GDI+ 绘制器
 │   │   ├── glyphs.rs           # 各 Agent 图标位图与光晕特效管理器
