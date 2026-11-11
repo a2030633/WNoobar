@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradB" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#161424"/>
+      <stop offset="100%" stop-color="#09090F"/>
+    </linearGradient>
+    <radialGradient id="topSpotB" cx="50%" cy="16%" r="50%">
+      <stop offset="0%" stop-color="#78A8FF" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#78A8FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rimGradB" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8CA5FF" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#412D4B" stop-opacity="0.75"/>
+    </linearGradient>
+    <linearGradient id="wGradB" x1="15%" y1="35%" x2="85%" y2="65%">
+      <stop offset="0%" stop-color="#0AA5FF"/>
+      <stop offset="35%" stop-color="#7364FF"/>
+      <stop offset="70%" stop-color="#FF6E96"/>
+      <stop offset="100%" stop-color="#FFA52D"/>
+    </linearGradient>
+    <filter id="auroraGlow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Main Obsidian Squircle -->
+  <rect x="28" y="28" width="456" height="456" rx="120" fill="url(#bgGradB)"/>
+  <rect x="28" y="28" width="456" height="456" rx="120" fill="url(#topSpotB)"/>
+  <rect x="31" y="31" width="450" height="450" rx="117" fill="none" stroke="url(#rimGradB)" stroke-width="6"/>
+
+  <!-- Top Edge-Peeking Micro Strip -->
+  <rect x="159" y="55" width="194" height="15" rx="7.5" fill="#A5E4FF" filter="url(#auroraGlow)"/>
+
+  <!-- AI Four-Point Star -->
+  <path d="M 256 102 Q 256 138 292 138 Q 256 138 256 174 Q 256 138 220 138 Q 256 138 256 102 Z" fill="#FFE8B9" filter="url(#auroraGlow)"/>
+
+  <!-- Aurora 'W' Ribbon -->
+  <polyline points="97,179 174,389 256,230 338,389 415,179"
+            fill="none" stroke="url(#wGradB)" stroke-width="54"
+            stroke-linecap="round" stroke-linejoin="round" filter="url(#auroraGlow)"/>
+</svg>

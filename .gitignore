@@ -1,0 +1,15 @@
+# Rust / Cargo build artifacts
+/target/
+**/*.rs.bk
+*.exe
+*.pdb
+
+# Machine-specific Cargo configuration
+.cargo/config.toml
+
+# Design concept drafts
+/ICON/
+
+# OS metadata
+.DS_Store
+Thumbs.db
