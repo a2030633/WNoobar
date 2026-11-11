@@ -1,4 +1,4 @@
-# <img width="512" height="512" alt="icon_concept_b_aurora_pill" src="https://github.com/user-attachments/assets/6498ca9c-5363-4add-8dd6-3fb9efd7f760" />
+# <img width="30" height="30" alt="icon_concept_b_aurora_pill" src="https://github.com/user-attachments/assets/6498ca9c-5363-4add-8dd6-3fb9efd7f760" />
 WNoobar (Windows AI Agent Dynamic Island)
 
 > **Silent by default, Delightful when active.**  
