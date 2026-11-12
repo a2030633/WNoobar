@@ -65,13 +65,20 @@ impl IslandState {
             EdgeDockMode::DeckExpanded => (440.0, 190.0),
             EdgeDockMode::Normal => match self {
                 IslandState::Idle => (210.0, 32.0),
-                IslandState::Started { .. } => (320.0, 38.0),
+                IslandState::Started { project_name, role_type, task_summary, .. } => {
+                    let total_chars = project_name.chars().count() + role_type.chars().count() + task_summary.chars().count();
+                    if total_chars <= 16 {
+                        (400.0, 38.0)
+                    } else {
+                        (440.0, 38.0)
+                    }
+                }
                 IslandState::Working { project_name, role_type, task_summary, .. } => {
                     let total_chars = project_name.chars().count() + role_type.chars().count() + task_summary.chars().count();
                     if total_chars <= 16 {
-                        (360.0, 38.0)
+                        (400.0, 38.0)
                     } else {
-                        (420.0, 38.0)
+                        (440.0, 38.0)
                     }
                 }
                 IslandState::ActionNeeded { prompt, .. } => {

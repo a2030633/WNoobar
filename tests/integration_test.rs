@@ -37,7 +37,7 @@ fn test_island_state_dimensions() {
         started_at: std::time::Instant::now(),
         auto_hide_secs: 1.8,
     };
-    assert_eq!(started.target_dimensions(EdgeDockMode::Normal), (320.0, 38.0));
+    assert_eq!(started.target_dimensions(EdgeDockMode::Normal), (400.0, 38.0));
 
     let working_short = IslandState::Working {
         session_id: "test-s1".into(),
@@ -48,7 +48,7 @@ fn test_island_state_dimensions() {
         step_index: 1,
         start_time: std::time::Instant::now(),
     };
-    assert_eq!(working_short.target_dimensions(EdgeDockMode::Normal), (360.0, 38.0));
+    assert_eq!(working_short.target_dimensions(EdgeDockMode::Normal), (400.0, 38.0));
 
     let working_long = IslandState::Working {
         session_id: "test-s1".into(),
@@ -59,7 +59,7 @@ fn test_island_state_dimensions() {
         step_index: 2,
         start_time: std::time::Instant::now(),
     };
-    assert_eq!(working_long.target_dimensions(EdgeDockMode::Normal), (420.0, 38.0));
+    assert_eq!(working_long.target_dimensions(EdgeDockMode::Normal), (440.0, 38.0));
 
     let done_short = IslandState::Done {
         session_id: "test-s1".into(),
@@ -137,13 +137,17 @@ fn test_codex_watcher_init() {
 fn test_multi_agent_watchers_init() {
     let (tx, _rx) = unbounded();
 
-    // 验证各 Watcher 的容错初始化
+    // 验证 8 大 Watcher 的容错初始化
     let _ = wnoobar::core::watcher::ClaudeWatcher::new(tx.clone());
     let _ = wnoobar::core::watcher::CursorWatcher::new(tx.clone());
     let deepseek = wnoobar::core::watcher::DeepSeekWatcher::new(tx.clone());
     assert!(deepseek.is_ok());
-    let opencode = wnoobar::core::watcher::OpenCodeWatcher::new(tx);
+    let opencode = wnoobar::core::watcher::OpenCodeWatcher::new(tx.clone());
     assert!(opencode.is_ok());
+    let grok = wnoobar::core::watcher::GrokWatcher::new(tx.clone());
+    assert!(grok.is_ok());
+    let copilot = wnoobar::core::watcher::CopilotWatcher::new(tx);
+    assert!(copilot.is_ok());
 }
 
 #[test]

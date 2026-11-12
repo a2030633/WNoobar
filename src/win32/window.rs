@@ -195,7 +195,8 @@ impl IslandWindow {
             );
 
             if hwnd.is_null() {
-                return Err("Failed to create Win32 layered window".into());
+                let err = windows_sys::Win32::Foundation::GetLastError();
+                return Err(format!("Failed to create Win32 layered window, GetLastError={err}"));
             }
 
             // 注入 Windows 11 深色模式
@@ -471,15 +472,38 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
 
-                    // 2. 检查 Started 状态超时（1.8秒致意后平滑贴边隐藏）
+                    // 2. 检查 Started 状态超时（1.8秒致意后平滑贴边隐藏，若无活跃会话彻底复位为待命就绪）
                     if let IslandState::Started { started_at, auto_hide_secs, .. } = &state.current_state {
                         if started_at.elapsed().as_secs_f32() > *auto_hide_secs {
+                            if state.active_sessions_pool.is_empty() {
+                                state.current_state = IslandState::Idle;
+                                update_tray_tip(hwnd, "WNoobar - 智能灵动岛 (待命就绪)");
+                            }
                             if !state.is_mouse_over && state.dock_mode != EdgeDockMode::Peeking {
                                 state.dock_mode = EdgeDockMode::Peeking;
                                 let (tw, th) = state.current_state.target_dimensions(state.dock_mode);
                                 state.width_spring.set_target(tw);
                                 state.height_spring.set_target(th);
                             }
+                        }
+                    }
+
+                    // 2.5 活跃会话池看门狗 (Watchdog: 超过 25 秒没有任何更新的幽灵会话自动驱逐)
+                    let pool_len_before = state.active_sessions_pool.len();
+                    state.active_sessions_pool.retain(|item| {
+                        item.last_update_time.elapsed() < Duration::from_secs(25)
+                    });
+                    if state.active_sessions_pool.is_empty() && pool_len_before > 0 {
+                        // 活跃池被驱逐清空，若当前停留在 Working 或 Started 状态，平滑切回 Idle
+                        if matches!(state.current_state, IslandState::Working { .. } | IslandState::Started { .. }) {
+                            state.current_state = IslandState::Idle;
+                            if !state.is_mouse_over {
+                                state.dock_mode = EdgeDockMode::Peeking;
+                            }
+                            let (tw, th) = state.current_state.target_dimensions(state.dock_mode);
+                            state.width_spring.set_target(tw);
+                            state.height_spring.set_target(th);
+                            update_tray_tip(hwnd, "WNoobar - 智能灵动岛 (待命就绪)");
                         }
                     }
 
@@ -688,9 +712,9 @@ unsafe extern "system" fn wnd_proc(
                     let h_anim = state.height_spring.update(dt);
                     state.renderer.update(dt);
 
-                    // 多会话轮播时，自适应调整胶囊目标尺寸
+                    // 多会话轮播时，自适应调整胶囊目标尺寸（放宽至 450px 保证各会话角色与进度摘要无截断展示）
                     if state.dock_mode == EdgeDockMode::Normal && state.active_sessions_pool.len() >= 2 {
-                        let ideal_w = 410.0;
+                        let ideal_w = 450.0;
                         state.width_spring.set_target(ideal_w);
                     }
 

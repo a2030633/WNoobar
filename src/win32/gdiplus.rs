@@ -145,6 +145,15 @@ unsafe extern "system" {
 
     pub fn GdipGetImageWidth(image: *mut c_void, width: *mut u32) -> i32;
     pub fn GdipGetImageHeight(image: *mut c_void, height: *mut u32) -> i32;
+    pub fn GdipCloneBitmapArea(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        format: i32,
+        srcBitmap: *mut c_void,
+        dstBitmap: *mut *mut c_void,
+    ) -> i32;
 
     pub fn GdipFillEllipse(
         graphics: *mut c_void,
@@ -282,14 +291,35 @@ pub unsafe fn create_bitmap_from_bytes(bytes: &[u8]) -> *mut c_void {
                 let mut bitmap: *mut c_void = null_mut();
                 let status = GdipCreateBitmapFromStream(stream, &mut bitmap);
 
-                // 释放 COM stream (IUnknown::Release 位于虚表第三个指针)
                 let vtable = *(stream as *mut *mut usize);
                 let release_fn: unsafe extern "system" fn(*mut c_void) -> u32 =
                     std::mem::transmute(*vtable.add(2));
-                release_fn(stream);
 
-                if status == 0 {
-                    return bitmap;
+                if status == 0 && !bitmap.is_null() {
+                    let mut width: u32 = 0;
+                    let mut height: u32 = 0;
+                    GdipGetImageWidth(bitmap, &mut width);
+                    GdipGetImageHeight(bitmap, &mut height);
+
+                    let mut cloned: *mut c_void = null_mut();
+                    let clone_status = GdipCloneBitmapArea(
+                        0.0,
+                        0.0,
+                        width as f32,
+                        height as f32,
+                        PIXEL_FORMAT_32BPP_PARGB,
+                        bitmap,
+                        &mut cloned,
+                    );
+
+                    GdipDisposeImage(bitmap);
+                    release_fn(stream);
+
+                    if clone_status == 0 && !cloned.is_null() {
+                        return cloned;
+                    }
+                } else {
+                    release_fn(stream);
                 }
             }
         }

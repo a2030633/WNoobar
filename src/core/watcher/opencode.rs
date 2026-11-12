@@ -206,17 +206,51 @@ impl OpenCodeWatcher {
         list
     }
 
+    pub fn map_subagent_role(agent_or_role: &str) -> String {
+        let lower = agent_or_role.to_lowercase();
+        if lower.contains("architect") || lower.contains("架构") {
+            "子智能体 · 架构设计".into()
+        } else if lower.contains("coder") || lower.contains("editor") || lower.contains("编码") || lower.contains("研发") {
+            "子智能体 · 核心编码".into()
+        } else if lower.contains("reviewer") || lower.contains("审查") || lower.contains("review") {
+            "子智能体 · 代码审查".into()
+        } else if lower.contains("tester") || lower.contains("测试") || lower.contains("qa") {
+            "子智能体 · 单元测试".into()
+        } else if !agent_or_role.trim().is_empty() {
+            format!("子智能体 · {}", agent_or_role.trim())
+        } else {
+            "子智能体 · 协同处理".into()
+        }
+    }
+
     pub fn read_session_info(file_path: &Path, default_proj: &str) -> (String, String) {
         if let Ok(mut f) = File::open(file_path) {
             let mut s = String::new();
             if f.read_to_string(&mut s).is_ok() {
                 if let Ok(val) = serde_json::from_str::<Value>(&s) {
-                    let title = val.get("title").and_then(|t| t.as_str()).unwrap_or("OpenCode 编程助手").to_string();
                     let proj = val.get("projectName")
                         .or_else(|| val.get("project_name"))
                         .and_then(|p| p.as_str())
                         .unwrap_or(default_proj)
                         .to_string();
+
+                    // 检测是否为子智能体 (parentId / parent_id 存在且非空)
+                    let parent_id = val.get("parentId")
+                        .or_else(|| val.get("parent_id"))
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty());
+
+                    let title = if parent_id.is_some() {
+                        let agent_field = val.get("agent")
+                            .or_else(|| val.get("role"))
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("");
+                        Self::map_subagent_role(agent_field)
+                    } else {
+                        val.get("title").and_then(|t| t.as_str()).unwrap_or("OpenCode 编程助手").to_string()
+                    };
+
                     return (proj, title);
                 }
             }
@@ -268,5 +302,37 @@ mod tests {
 
         assert_eq!(proj, "BackendService");
         assert_eq!(title, "优化数据库索引");
+    }
+
+    #[test]
+    fn test_opencode_subagent_roles() {
+        let temp_dir = std::env::temp_dir().join(format!("opencode_sub_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        // 1. 架构师子智能体
+        let f1 = temp_dir.join("sub_arch.json");
+        fs::write(&f1, r#"{"parentId": "parent-123", "agent": "architect", "projectName": "WNoobar"}"#).unwrap();
+        let (_, r1) = OpenCodeWatcher::read_session_info(&f1, "default");
+        assert_eq!(r1, "子智能体 · 架构设计");
+
+        // 2. 编码者子智能体
+        let f2 = temp_dir.join("sub_coder.json");
+        fs::write(&f2, r#"{"parent_id": "parent-123", "role": "coder", "projectName": "WNoobar"}"#).unwrap();
+        let (_, r2) = OpenCodeWatcher::read_session_info(&f2, "default");
+        assert_eq!(r2, "子智能体 · 核心编码");
+
+        // 3. 审查者子智能体
+        let f3 = temp_dir.join("sub_rev.json");
+        fs::write(&f3, r#"{"parentId": "parent-123", "agent": "reviewer", "projectName": "WNoobar"}"#).unwrap();
+        let (_, r3) = OpenCodeWatcher::read_session_info(&f3, "default");
+        assert_eq!(r3, "子智能体 · 代码审查");
+
+        // 4. 测试者子智能体
+        let f4 = temp_dir.join("sub_test.json");
+        fs::write(&f4, r#"{"parentId": "parent-123", "agent": "tester", "projectName": "WNoobar"}"#).unwrap();
+        let (_, r4) = OpenCodeWatcher::read_session_info(&f4, "default");
+        assert_eq!(r4, "子智能体 · 单元测试");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

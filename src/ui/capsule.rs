@@ -352,7 +352,7 @@ impl CapsuleRenderer {
             let proj_utf16: Vec<u16> = format!("{}\0", proj_name).encode_utf16().collect();
             let mut cur_x = (glyph_x + 14.0).round();
             let measured_proj_w = Self::measure_text_w(graphics, self.font_title, proj_name, self.format_single_line);
-            let proj_w = measured_proj_w.clamp(20.0, 95.0).round();
+            let proj_w = measured_proj_w.clamp(20.0, 85.0).round();
             let proj_rect = RectF { x: cur_x, y: text_y, width: proj_w, height: text_h };
             let mut proj_brush: *mut c_void = null_mut();
             GdipCreateSolidFill(make_argb(255, 255, 255, 255), &mut proj_brush);
@@ -370,11 +370,11 @@ impl CapsuleRenderer {
             GdipDrawString(graphics, dot_utf16.as_ptr(), dot_utf16.len() as i32 - 1, self.font_body, &dot_rect1, self.format_single_line, dot_brush);
             cur_x = (cur_x + dot_w + 6.0).round();
 
-            // 2. 信息层级第二段：[角色/会话名]（天蓝色，测宽自适应，绝不折行）
+            // 2. 信息层级第二段：[角色/会话名]（天蓝色，测宽自适应，上限控在 105px 严防长句挤压右侧摘要）
             let role_clean = role.trim();
             let role_utf16: Vec<u16> = format!("{}\0", role_clean).encode_utf16().collect();
             let measured_role_w = Self::measure_text_w(graphics, self.font_role, role_clean, self.format_single_line);
-            let role_w = measured_role_w.clamp(24.0, 130.0).round();
+            let role_w = measured_role_w.clamp(24.0, 105.0).round();
             let role_rect = RectF { x: cur_x, y: text_y, width: role_w, height: text_h };
             let mut role_brush: *mut c_void = null_mut();
             GdipCreateSolidFill(make_argb(255, 10, 185, 255), &mut role_brush); // 纯粹高明度天蓝，字体清晰明快
@@ -491,7 +491,7 @@ impl CapsuleRenderer {
             let proj_utf16: Vec<u16> = format!("{}\0", proj_name).encode_utf16().collect();
             let mut cur_x = (glyph_x + 14.0).round();
             let measured_proj_w = Self::measure_text_w(graphics, self.font_title, proj_name, self.format_single_line);
-            let proj_w = measured_proj_w.clamp(20.0, 95.0).round();
+            let proj_w = measured_proj_w.clamp(20.0, 85.0).round();
             let proj_rect = RectF { x: cur_x, y: text_y, width: proj_w, height: text_h };
             let mut proj_brush: *mut c_void = null_mut();
             GdipCreateSolidFill(make_argb(255, 255, 255, 255), &mut proj_brush);
@@ -509,11 +509,11 @@ impl CapsuleRenderer {
             GdipDrawString(graphics, dot_utf16.as_ptr(), dot_utf16.len() as i32 - 1, self.font_body, &dot_rect1, self.format_single_line, dot_brush);
             cur_x = (cur_x + dot_w + 6.0).round();
 
-            // 2. 角色/会话名 (天蓝色)
+            // 2. 角色/会话名 (天蓝色，上限控制在 105px)
             let role_clean = role.trim();
             let role_utf16: Vec<u16> = format!("{}\0", role_clean).encode_utf16().collect();
             let measured_role_w = Self::measure_text_w(graphics, self.font_role, role_clean, self.format_single_line);
-            let role_w = measured_role_w.clamp(24.0, 130.0).round();
+            let role_w = measured_role_w.clamp(24.0, 105.0).round();
             let role_rect = RectF { x: cur_x, y: text_y, width: role_w, height: text_h };
             let mut role_brush: *mut c_void = null_mut();
             GdipCreateSolidFill(make_argb(255, 10, 185, 255), &mut role_brush);

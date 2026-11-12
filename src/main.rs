@@ -10,14 +10,15 @@ use std::time::Duration;
 
 use core::bus::{AgentEvent, EventBus};
 use core::watcher::{
-    AntigravityWatcher, ClaudeWatcher, CodexWatcher, CursorWatcher, DeepSeekWatcher, OpenCodeWatcher,
+    AntigravityWatcher, ClaudeWatcher, CodexWatcher, CopilotWatcher, CursorWatcher, DeepSeekWatcher,
+    GrokWatcher, OpenCodeWatcher,
 };
 use win32::{GdiplusContext, IslandWindow};
 
 fn main() {
     println!("==================================================");
     println!("     WNoobar (Windows AI Agent Dynamic Island)    ");
-    println!("       Version 1.0.0 (Multi-Agent Ecosystem)      ");
+    println!("       Version 1.1.0 (8-Agent Ecosystem)          ");
     println!("==================================================");
 
     // 1. 初始化 Windows GDI+ 原生渲染子系统
@@ -93,6 +94,28 @@ fn main() {
         }
         Err(e) => {
             println!("[Watcher] OpenCode monitor skipped: {e}");
+        }
+    }
+
+    // 3.7 xAI Grok
+    match GrokWatcher::new(tx.clone()) {
+        Ok(mut watcher) => {
+            watcher.start();
+            println!("[Watcher] Grok monitor started.");
+        }
+        Err(e) => {
+            println!("[Watcher] Grok monitor skipped: {e}");
+        }
+    }
+
+    // 3.8 VS Code GitHub Copilot
+    match CopilotWatcher::new(tx.clone()) {
+        Ok(mut watcher) => {
+            watcher.start();
+            println!("[Watcher] GitHub Copilot monitor started.");
+        }
+        Err(e) => {
+            println!("[Watcher] GitHub Copilot monitor skipped: {e}");
         }
     }
 

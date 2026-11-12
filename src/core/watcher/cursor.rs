@@ -102,10 +102,13 @@ impl CursorWatcher {
                     if Some(curr_time) != track.last_db_mod_time {
                         track.last_db_mod_time = Some(curr_time);
 
-                        // 读取变更片段内容进行模式判断
-                        let (is_gen, prompt_hint) = Self::inspect_db_change(&db_path);
+                        // 读取变更片段内容进行模式判断与智能体角色识别
+                        let (is_gen, prompt_hint, role_hint) = Self::inspect_db_change(&db_path);
 
                         if is_gen {
+                            if let Some(role) = role_hint {
+                                track.role_type = role;
+                            }
                             track.last_active_time = Some(Instant::now());
                             track.step_count += 1;
 
@@ -230,7 +233,7 @@ impl CursorWatcher {
         None
     }
 
-    pub fn inspect_db_change(path: &Path) -> (bool, Option<String>) {
+    pub fn inspect_db_change(path: &Path) -> (bool, Option<String>, Option<String>) {
         if let Ok(mut f) = File::open(path) {
             let mut buf = Vec::new();
             // 读取最新尾部 32KB 判断当前状态
@@ -240,17 +243,28 @@ impl CursorWatcher {
                 let _ = f.read_to_end(&mut buf);
                 let text = String::from_utf8_lossy(&buf);
 
-                if text.contains("generating")
+                let is_generating = text.contains("generating")
                     || text.contains("isGenerating\":true")
                     || text.contains("bubbleId")
                     || text.contains("composerData")
-                    || text.contains("chat")
-                {
-                    return (true, Some("Composer 处理中...".into()));
+                    || text.contains("chat");
+
+                if is_generating {
+                    // 细分识别 Composer Agent 多分支/多文件模式
+                    if text.contains("agentMode") || text.contains("\"mode\":\"agent\"") || text.contains("agent_run") {
+                        return (true, Some("Composer Agent 正在规划并修改代码...".into()), Some("Composer Agent".into()));
+                    }
+                    if text.contains("multiFileEdit") || text.contains("multiFile") || text.contains("modifiedFiles") {
+                        return (true, Some("Composer 正在多文件并发协同...".into()), Some("多文件协同".into()));
+                    }
+                    if text.contains("composerData") {
+                        return (true, Some("Composer 正在生成代码...".into()), Some("Composer 智能体".into()));
+                    }
+                    return (true, Some("Composer 处理中...".into()), Some("Composer 协同".into()));
                 }
             }
         }
-        (false, None)
+        (false, None, None)
     }
 }
 
@@ -271,5 +285,22 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
 
         assert_eq!(detected, Some("MySuperApp".into()));
+    }
+
+    #[test]
+    fn test_cursor_composer_agent_mode() {
+        let temp_dir = std::env::temp_dir().join(format!("cursor_db_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let db_file = temp_dir.join("state.vscdb-wal");
+
+        let agent_data = r#"{"composerData": {"agentMode": true, "generating": true}}"#;
+        fs::write(&db_file, agent_data).unwrap();
+
+        let (is_gen, hint, role) = CursorWatcher::inspect_db_change(&db_file);
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(is_gen);
+        assert_eq!(role, Some("Composer Agent".into()));
+        assert!(hint.unwrap().contains("Composer Agent"));
     }
 }

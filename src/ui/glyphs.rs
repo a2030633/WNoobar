@@ -12,6 +12,8 @@ const CODEX_PNG: &[u8] = include_bytes!("../../assets/icons/codex.png");
 const CURSOR_PNG: &[u8] = include_bytes!("../../assets/icons/cursor.png");
 const DEEPSEEK_PNG: &[u8] = include_bytes!("../../assets/icons/deepseek.png");
 const OPENCODE_PNG: &[u8] = include_bytes!("../../assets/icons/opencode.png");
+const GROK_PNG: &[u8] = include_bytes!("../../assets/icons/grok.png");
+const COPILOT_PNG: &[u8] = include_bytes!("../../assets/icons/copilot.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentBrand {
@@ -22,6 +24,8 @@ pub enum AgentBrand {
     Cursor,
     DeepSeek,
     OpenCode,
+    Grok,
+    Copilot,
 }
 
 impl AgentBrand {
@@ -37,7 +41,11 @@ impl AgentBrand {
             AgentBrand::OpenCode
         } else if lower.contains("deepseek") {
             AgentBrand::DeepSeek
-        } else if lower.contains("codex") || lower.contains("copilot") {
+        } else if lower.contains("grok") {
+            AgentBrand::Grok
+        } else if lower.contains("copilot") {
+            AgentBrand::Copilot
+        } else if lower.contains("codex") {
             AgentBrand::Codex
         } else {
             AgentBrand::Antigravity
@@ -53,6 +61,8 @@ impl AgentBrand {
             AgentBrand::Cursor => "Cursor",
             AgentBrand::DeepSeek => "DeepSeek",
             AgentBrand::OpenCode => "OpenCode",
+            AgentBrand::Grok => "Grok",
+            AgentBrand::Copilot => "GitHub Copilot",
         }
     }
 }
@@ -65,6 +75,8 @@ pub struct GlyphManager {
     bmp_cursor: *mut c_void,
     bmp_deepseek: *mut c_void,
     bmp_opencode: *mut c_void,
+    bmp_grok: *mut c_void,
+    bmp_copilot: *mut c_void,
 }
 
 impl GlyphManager {
@@ -77,6 +89,8 @@ impl GlyphManager {
             let bmp_cursor = create_bitmap_from_bytes(CURSOR_PNG);
             let bmp_deepseek = create_bitmap_from_bytes(DEEPSEEK_PNG);
             let bmp_opencode = create_bitmap_from_bytes(OPENCODE_PNG);
+            let bmp_grok = create_bitmap_from_bytes(GROK_PNG);
+            let bmp_copilot = create_bitmap_from_bytes(COPILOT_PNG);
 
             Self {
                 bmp_wnoobar,
@@ -86,6 +100,8 @@ impl GlyphManager {
                 bmp_cursor,
                 bmp_deepseek,
                 bmp_opencode,
+                bmp_grok,
+                bmp_copilot,
             }
         }
     }
@@ -122,6 +138,8 @@ impl GlyphManager {
                 AgentBrand::Cursor => make_argb(35, 99, 102, 241),    // 赛博幻紫
                 AgentBrand::DeepSeek => make_argb(35, 30, 111, 255),  // 深海深蓝
                 AgentBrand::OpenCode => make_argb(35, 79, 70, 229),   // 极客靛蓝
+                AgentBrand::Grok => make_argb(35, 235, 235, 240),     // 深空银白
+                AgentBrand::Copilot => make_argb(35, 147, 51, 234),   // 电光幻紫
             };
 
             let r = size / 2.0;
@@ -139,6 +157,8 @@ impl GlyphManager {
                 AgentBrand::Cursor => self.bmp_cursor,
                 AgentBrand::DeepSeek => self.bmp_deepseek,
                 AgentBrand::OpenCode => self.bmp_opencode,
+                AgentBrand::Grok => self.bmp_grok,
+                AgentBrand::Copilot => self.bmp_copilot,
             };
 
             if !target_bmp.is_null() {
@@ -163,6 +183,8 @@ impl GlyphManager {
                 AgentBrand::Cursor => make_argb(255, 99, 102, 241),
                 AgentBrand::DeepSeek => make_argb(255, 30, 111, 255),
                 AgentBrand::OpenCode => make_argb(255, 79, 70, 229),
+                AgentBrand::Grok => make_argb(255, 235, 235, 240),
+                AgentBrand::Copilot => make_argb(255, 147, 51, 234),
             };
             let mut brush: *mut c_void = null_mut();
             GdipCreateSolidFill(color, &mut brush);
@@ -182,6 +204,8 @@ impl Drop for GlyphManager {
             if !self.bmp_cursor.is_null() { GdipDisposeImage(self.bmp_cursor); }
             if !self.bmp_deepseek.is_null() { GdipDisposeImage(self.bmp_deepseek); }
             if !self.bmp_opencode.is_null() { GdipDisposeImage(self.bmp_opencode); }
+            if !self.bmp_grok.is_null() { GdipDisposeImage(self.bmp_grok); }
+            if !self.bmp_copilot.is_null() { GdipDisposeImage(self.bmp_copilot); }
         }
     }
 }
@@ -199,10 +223,14 @@ mod tests {
         assert_eq!(AgentBrand::from_name("Codex"), AgentBrand::Codex);
         assert_eq!(AgentBrand::from_name("WNoobar"), AgentBrand::WNoobar);
         assert_eq!(AgentBrand::from_name("Antigravity"), AgentBrand::Antigravity);
+        assert_eq!(AgentBrand::from_name("xAI Grok"), AgentBrand::Grok);
+        assert_eq!(AgentBrand::from_name("GitHub Copilot"), AgentBrand::Copilot);
 
         assert_eq!(AgentBrand::Cursor.display_name(), "Cursor");
         assert_eq!(AgentBrand::OpenCode.display_name(), "OpenCode");
         assert_eq!(AgentBrand::Claude.display_name(), "Claude Code");
         assert_eq!(AgentBrand::DeepSeek.display_name(), "DeepSeek");
+        assert_eq!(AgentBrand::Grok.display_name(), "Grok");
+        assert_eq!(AgentBrand::Copilot.display_name(), "GitHub Copilot");
     }
 }

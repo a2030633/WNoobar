@@ -334,6 +334,17 @@ impl ClaudeWatcher {
                         if ctype == "tool_use" {
                             let tool_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("工具调用");
                             tool_used = Some(tool_name.to_string());
+
+                            // 检测 Claude 3.7 / Claude Code 的子任务与智能体调用
+                            if Self::is_subagent_tool(tool_name) {
+                                if let Some(sub_desc) = Self::extract_subtask_desc(item.get("input")) {
+                                    track.role_type = format!("子任务 · {}", Self::truncate(&sub_desc, 6));
+                                    track.last_action_desc = format!("派发子任务 · {}", Self::truncate(&sub_desc, 16));
+                                } else {
+                                    track.role_type = "子任务协同".into();
+                                    track.last_action_desc = format!("调用智能体 · {}", tool_name);
+                                }
+                            }
                         } else if ctype == "text" {
                             if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
                                 text_candidate.push_str(txt);
@@ -352,7 +363,9 @@ impl ClaudeWatcher {
                     track.is_working = true;
                     track.has_reported_done = false;
                     track.last_model_finished_time = None;
-                    track.last_action_desc = format!("执行 (第 {} 步) · {}", track.last_step_index, tool);
+                    if !track.last_action_desc.starts_with("派发子任务") && !track.last_action_desc.starts_with("调用智能体") {
+                        track.last_action_desc = format!("执行 (第 {} 步) · {}", track.last_step_index, tool);
+                    }
                     return true;
                 }
 
@@ -397,6 +410,34 @@ impl ClaudeWatcher {
             }
             _ => false,
         }
+    }
+
+    pub fn is_subagent_tool(tool_name: &str) -> bool {
+        let lower = tool_name.to_lowercase();
+        lower == "task"
+            || lower == "agent"
+            || lower == "worker"
+            || lower == "subagent"
+            || lower == "sub_task"
+            || lower == "subtask"
+            || lower.starts_with("task_")
+            || lower.starts_with("agent_")
+            || lower.ends_with("_task")
+            || lower.ends_with("_agent")
+    }
+
+    pub fn extract_subtask_desc(input_val: Option<&Value>) -> Option<String> {
+        if let Some(val) = input_val {
+            for key in &["description", "prompt", "task", "instruction", "subtask", "query", "title"] {
+                if let Some(s) = val.get(*key).and_then(|v| v.as_str()) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn truncate(s: &str, max_len: usize) -> String {
@@ -626,5 +667,47 @@ mod tests {
 
         assert!(ClaudeWatcher::parse_entry(&mode_entry, &mut track));
         assert!(track.last_model_finished_time.is_some());
+    }
+
+    #[test]
+    fn test_claude_subagent_task_dispatch() {
+        let mut track = ClaudeSessionTrackInfo {
+            session_id: "claude-sess-sub".into(),
+            project_name: "WNoobar".into(),
+            role_type: "Claude Code".into(),
+            agent_name: "Claude".into(),
+            file_offset: 0,
+            last_event_time: Instant::now(),
+            last_step_index: 0,
+            last_action_desc: "待命".into(),
+            is_working: false,
+            has_reported_done: true,
+            task_start_pending: false,
+            task_summary_pending: "".into(),
+            last_model_finished_time: None,
+            final_summary_candidate: "".into(),
+            done_pending: None,
+        };
+
+        let tool_use_entry = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Task",
+                        "input": {
+                            "description": "优化代理路由与缓存算法"
+                        }
+                    }
+                ]
+            }
+        });
+
+        assert!(ClaudeWatcher::parse_entry(&tool_use_entry, &mut track));
+        assert!(track.is_working);
+        assert!(track.role_type.contains("子任务 · "));
+        assert!(track.last_action_desc.contains("派发子任务 · 优化代理路由与缓存"));
     }
 }

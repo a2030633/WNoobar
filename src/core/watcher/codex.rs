@@ -106,10 +106,10 @@ impl CodexWatcher {
                     }
                 });
 
-                // 同步会话自定义名称
+                // 同步会话自定义名称（经过领域规范化清洗，防止整句提问塞满导致胶囊排版截断）
                 if let Some(name) = thread_names.get(&session_id) {
                     if !name.trim().is_empty() && name != "待命就绪" {
-                        track.role_type = name.clone();
+                        track.role_type = Self::normalize_role_name(name);
                     }
                 }
 
@@ -424,7 +424,7 @@ impl CodexWatcher {
                             val.get("thread_name").and_then(|n| n.as_str()),
                         ) {
                             if !name.trim().is_empty() {
-                                map.insert(id.to_string(), name.to_string());
+                                map.insert(id.to_string(), Self::normalize_role_name(name));
                             }
                         }
                     }
@@ -530,5 +530,178 @@ impl CodexWatcher {
         } else {
             clean
         }
+    }
+
+    /// 规范化清洗 Codex 会话/角色名称
+    /// 解决用户提问长句（例如“帮我编写一个测试脚本验证多线程性能”）直接塞满天蓝色角色位导致右侧截断的硬伤
+    pub fn normalize_role_name(name: &str) -> String {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return "功能研发".into();
+        }
+
+        // 若已经是 6 个字符以内的干练短语且无明显句末标点，直接保留
+        let char_count = trimmed.chars().count();
+        let has_punctuation = trimmed.contains('。')
+            || trimmed.contains('？')
+            || trimmed.contains('！')
+            || trimmed.contains('，')
+            || trimmed.contains('?')
+            || trimmed.contains('!')
+            || trimmed.contains(',')
+            || trimmed.contains(':')
+            || trimmed.contains('：');
+
+        if char_count <= 6 && !has_punctuation {
+            return trimmed.to_string();
+        }
+
+        let lower = trimmed.to_lowercase();
+
+        // 领域关键词匹配
+        if lower.contains("test")
+            || lower.contains("测试")
+            || lower.contains("验证")
+            || lower.contains("unittest")
+            || lower.contains("单测")
+            || lower.contains("bench")
+        {
+            return "测试验证".into();
+        }
+
+        if lower.contains("fix")
+            || lower.contains("bug")
+            || lower.contains("修复")
+            || lower.contains("缺陷")
+            || lower.contains("报错")
+            || lower.contains("issue")
+            || lower.contains("error")
+            || lower.contains("crash")
+            || lower.contains("排查")
+        {
+            return "缺陷修复".into();
+        }
+
+        if lower.contains("refactor")
+            || lower.contains("重构")
+            || lower.contains("架构")
+            || lower.contains("architecture")
+            || lower.contains("拆分")
+        {
+            return "架构重构".into();
+        }
+
+        if lower.contains("optimi")
+            || lower.contains("性能")
+            || lower.contains("加速")
+            || lower.contains("内存")
+            || lower.contains("perf")
+            || lower.contains("speed")
+            || lower.contains("缩容")
+        {
+            return "性能优化".into();
+        }
+
+        if lower.contains("deploy")
+            || lower.contains("发布")
+            || lower.contains("ci")
+            || lower.contains("cd")
+            || lower.contains("pipeline")
+            || lower.contains("docker")
+            || lower.contains("构建")
+            || lower.contains("build")
+            || lower.contains("编译")
+        {
+            return "构建部署".into();
+        }
+
+        if lower.contains("docs")
+            || lower.contains("document")
+            || lower.contains("文档")
+            || lower.contains("readme")
+            || lower.contains("注释")
+            || lower.contains("说明")
+        {
+            return "文档编写".into();
+        }
+
+        if lower.contains("review")
+            || lower.contains("评审")
+            || lower.contains("审查")
+            || lower.contains("audit")
+            || lower.contains("检查")
+        {
+            return "代码审查".into();
+        }
+
+        if lower.contains("ui")
+            || lower.contains("界面")
+            || lower.contains("样式")
+            || lower.contains("css")
+            || lower.contains("frontend")
+            || lower.contains("前端")
+            || lower.contains("组件")
+            || lower.contains("弹窗")
+        {
+            return "界面研发".into();
+        }
+
+        if lower.contains("api")
+            || lower.contains("后端")
+            || lower.contains("服务")
+            || lower.contains("server")
+            || lower.contains("route")
+            || lower.contains("proxy")
+            || lower.contains("代理")
+            || lower.contains("网关")
+        {
+            return "后端服务".into();
+        }
+
+        if lower.contains("subagent")
+            || lower.contains("subtask")
+            || lower.contains("子任务")
+            || lower.contains("子智能体")
+        {
+            return "协同处理".into();
+        }
+
+        if lower.contains("feat")
+            || lower.contains("功能")
+            || lower.contains("新增")
+            || lower.contains("开发")
+            || lower.contains("实现")
+            || lower.contains("add")
+            || lower.contains("implement")
+            || lower.contains("编写")
+        {
+            return "功能研发".into();
+        }
+
+        // 若均未命中，提取标点前的核心前缀（至多 6 字符）
+        let prefix = trimmed.split(&['。', '？', '！', '，', '?', '!', ',', ':', '：', '\n'][..]).next().unwrap_or(trimmed);
+        let cleaned: String = prefix.chars().filter(|c| !c.is_ascii_punctuation()).take(6).collect();
+        if !cleaned.trim().is_empty() {
+            cleaned.trim().to_string()
+        } else {
+            "功能研发".into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codex_normalize_role_name() {
+        assert_eq!(CodexWatcher::normalize_role_name("帮我写一个测试脚本验证多线程性能"), "测试验证");
+        assert_eq!(CodexWatcher::normalize_role_name("修复窗口渲染黑边和崩溃Bug"), "缺陷修复");
+        assert!(CodexWatcher::normalize_role_name("重构 watcher 模块代码结构") == "架构重构");
+        assert_eq!(CodexWatcher::normalize_role_name("优化内存占用与渲染帧率性能"), "性能优化");
+        assert_eq!(CodexWatcher::normalize_role_name("编写项目使用文档和README"), "文档编写");
+        assert_eq!(CodexWatcher::normalize_role_name("代码审查"), "代码审查");
+        assert_eq!(CodexWatcher::normalize_role_name("Docker 构建与发布流水线"), "构建部署");
+        assert_eq!(CodexWatcher::normalize_role_name(""), "功能研发");
     }
 }
