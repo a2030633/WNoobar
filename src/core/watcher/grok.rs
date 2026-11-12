@@ -170,7 +170,8 @@ impl GrokWatcher {
                     let should_deliver = match track.last_model_finished_time {
                         Some(finish_time) => finish_time.elapsed() >= Duration::from_millis(800),
                         None => {
-                            (!track.final_summary_candidate.is_empty() || track.last_step_index > 0)
+                            // 静默超时兜底：必须已有总结候选，且已静默超过 2.5s（防止在 tool 执行中途误收敛）
+                            !track.final_summary_candidate.is_empty()
                                 && track.last_event_time.elapsed() >= Duration::from_millis(2500)
                         }
                     };

@@ -168,6 +168,7 @@ impl AntigravityWatcher {
                                 track.is_working = false;
                                 track.has_reported_done = true;
                                 track.last_model_finished_time = None;
+                                track.final_summary_candidate.clear();
                             }
                         }
 
@@ -199,6 +200,7 @@ impl AntigravityWatcher {
                             track.is_working = true;
                             track.has_reported_done = false;
                             track.last_model_finished_time = None;
+                            track.final_summary_candidate.clear();
                             println!("[Watcher] ActionNeeded: [{}] - {}", track.project_name, prompt);
                             let _ = sender.send(AgentEvent::ActionNeeded {
                                 session_id: track.session_id.clone(),
@@ -247,6 +249,7 @@ impl AntigravityWatcher {
                             } else {
                                 format!("任务交付完成 (共 {} 步)", track.last_step_index)
                             };
+                            track.final_summary_candidate.clear();
 
                             let artifacts = Self::count_artifacts(&session_path);
                             let duration = track.last_event_time.elapsed().as_secs().max(1);
@@ -265,32 +268,14 @@ impl AntigravityWatcher {
                     }
                 }
 
-                // 3.5 【超时自动收敛兜底】：会话处于 is_working 且无待决人机交互，超过 15 秒没有任何文件增量或事件更新，自动平滑收敛 Done
+                // 3.5 【长休眠会话静默回收安全兜底】：会话处于 is_working 且超过 15 分钟无任何活动，静默复位，严禁向用户误报 Done！
                 if track.is_working && !track.has_reported_done && track.action_needed_pending.is_none() {
-                    if track.last_event_time.elapsed() >= Duration::from_secs(15) {
+                    if track.last_event_time.elapsed() >= Duration::from_secs(900) {
                         track.is_working = false;
                         track.has_reported_done = true;
                         track.last_model_finished_time = None;
-
-                        let summary = if !track.final_summary_candidate.is_empty() {
-                            track.final_summary_candidate.clone()
-                        } else if track.last_step_index > 0 {
-                            format!("任务交付完成 (共 {} 步)", track.last_step_index)
-                        } else {
-                            "任务处理完毕".into()
-                        };
-
-                        let duration = track.last_event_time.elapsed().as_secs().max(1);
-                        println!("[Watcher] Task Timeout Converged to Done: [{}] - {}", track.project_name, summary);
-                        let _ = sender.send(AgentEvent::Done {
-                            session_id: track.session_id.clone(),
-                            project_name: track.project_name.clone(),
-                            role_type: track.role_type.clone(),
-                            agent_name: track.agent_name.clone(),
-                            summary,
-                            duration_secs: duration,
-                            artifacts_count: 0,
-                        });
+                        track.final_summary_candidate.clear();
+                        println!("[Watcher] Inactive session silently retired: [{}]", track.project_name);
                     }
                 }
             }
@@ -508,6 +493,7 @@ impl AntigravityWatcher {
             track.is_working = true;
             track.has_reported_done = false;
             track.last_model_finished_time = None;
+            track.final_summary_candidate.clear();
             track.last_action_desc = if is_subagent_task {
                 "子智能体已唤醒 · 准备中...".into()
             } else {
@@ -632,6 +618,7 @@ impl AntigravityWatcher {
             track.is_working = true;
             track.has_reported_done = false;
             track.last_model_finished_time = None;
+            track.final_summary_candidate.clear();
             track.last_action_desc = format!("规划中 (第 {} 步) · 梳理方案...", step_index);
             return true;
         }
@@ -947,5 +934,84 @@ mod tests {
         assert!(AntigravityWatcher::parse_entry(&step_51, &mut track));
         assert!(track.action_needed_pending.is_none());
         assert!(track.last_model_finished_time.is_some());
+    }
+
+    #[test]
+    fn test_long_running_tool_does_not_prematurely_complete() {
+        let mut track = SessionTrackInfo {
+            session_id: "test-long-build".into(),
+            project_name: "WNoobar".into(),
+            role_type: "系统研发".into(),
+            agent_name: "Antigravity".into(),
+            file_offset: 0,
+            last_event_time: Instant::now(),
+            last_step_index: 10,
+            last_action_desc: "执行".into(),
+            is_working: false,
+            has_reported_done: false,
+            last_model_finished_time: None,
+            final_summary_candidate: String::new(),
+            task_start_pending: false,
+            action_needed_pending: None,
+            is_initial_catchup: false,
+        };
+
+        // 用户输入任务
+        let user_step = json!({
+            "step_index": 1,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "<USER_REQUEST>cargo build --release</USER_REQUEST>"
+        });
+        assert!(AntigravityWatcher::parse_entry(&user_step, &mut track));
+        assert!(track.is_working);
+        assert!(!track.has_reported_done);
+        assert!(track.last_model_finished_time.is_none());
+
+        // 发起长时间运行的构建工具调用
+        let tool_step = json!({
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "cargo build --release",
+                    "toolSummary": "Build release binary"
+                }
+            }]
+        });
+        assert!(AntigravityWatcher::parse_entry(&tool_step, &mut track));
+        assert!(track.is_working);
+        assert!(!track.has_reported_done);
+        // 工具运行中，绝不能标记模型答复完成
+        assert!(track.last_model_finished_time.is_none());
+        assert_eq!(track.last_action_desc, "处理中 (第 2 步) · 执行 · Build release bina...");
+
+        // 工具完成返回
+        let tool_resp = json!({
+            "step_index": 3,
+            "source": "TOOL",
+            "type": "TOOL_RESPONSE",
+            "status": "DONE",
+            "content": "Finished release target(s)"
+        });
+        assert!(!AntigravityWatcher::parse_entry(&tool_resp, &mut track));
+        assert!(track.is_working);
+        assert!(track.last_model_finished_time.is_none());
+
+        // 最终收官总结
+        let final_step = json!({
+            "step_index": 4,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "构建已成功完成！产物位于 target/release/wnoobar.exe"
+        });
+        assert!(AntigravityWatcher::parse_entry(&final_step, &mut track));
+        assert!(track.is_working);
+        assert!(track.last_model_finished_time.is_some());
+        assert!(!track.final_summary_candidate.is_empty());
     }
 }

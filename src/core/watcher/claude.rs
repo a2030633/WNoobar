@@ -179,8 +179,8 @@ impl ClaudeWatcher {
                     let should_deliver = match track.last_model_finished_time {
                         Some(finish_time) => finish_time.elapsed() >= Duration::from_millis(800),
                         None => {
-                            // 静默超时兜底：至少已有总结候选或已有执行步骤，且已静默超过 2.5s
-                            (!track.final_summary_candidate.is_empty() || track.last_step_index > 0)
+                            // 静默超时兜底：必须已有总结候选文本，且已静默超过 2.5s（防止在 tool_use 执行中途误判完成）
+                            !track.final_summary_candidate.is_empty()
                                 && track.last_event_time.elapsed() >= Duration::from_millis(2500)
                         }
                     };

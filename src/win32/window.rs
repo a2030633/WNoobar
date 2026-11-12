@@ -392,8 +392,8 @@ unsafe extern "system" fn wnd_proc(
                     let in_hit = if state.dock_mode == EdgeDockMode::DeckExpanded {
                         log_x >= cap_x - 14.0 && log_x <= cap_x + cap_w + 14.0 && log_y >= 0.0 && log_y <= cap_y + cap_h + 14.0
                     } else if state.dock_mode == EdgeDockMode::Peeking {
-                        // 贴顶极细微光条核心感应带
-                        log_x >= (state.logical_w - 160.0) / 2.0 && log_x <= (state.logical_w + 160.0) / 2.0 && log_y >= 0.0 && log_y <= 12.0
+                        // 贴顶极细微光条核心感应带（180px 宽，14px 高，触碰即开）
+                        log_x >= (state.logical_w - 180.0) / 2.0 && log_x <= (state.logical_w + 180.0) / 2.0 && log_y >= 0.0 && log_y <= 14.0
                     } else {
                         log_x >= cap_x - 14.0 && log_x <= cap_x + cap_w + 14.0 && log_y >= 0.0 && log_y <= cap_y + cap_h + 14.0
                     };
@@ -425,10 +425,10 @@ unsafe extern "system" fn wnd_proc(
                     let cap_y = 4.5 * morph;
 
                     // 阈值 A：唤醒盒 (Enter Box - 紧凑精准)：处于贴边时，只要鼠标进入顶部核心条立即唤醒
-                    let in_enter_box = log_x >= center_x - 80.0
-                        && log_x <= center_x + 80.0
+                    let in_enter_box = log_x >= center_x - 90.0
+                        && log_x <= center_x + 90.0
                         && log_y >= 0.0
-                        && log_y <= 10.0;
+                        && log_y <= 14.0;
 
                     // 阈值 B：保持盒 (Keep-Alive Box - 宽裕包裹)：处于展开态时，外扩 18px 几何防抖保护
                     let in_keep_box = log_x >= cap_x - 18.0
@@ -488,10 +488,10 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
 
-                    // 2.5 活跃会话池看门狗 (Watchdog: 超过 25 秒没有任何更新的幽灵会话自动驱逐)
+                    // 2.5 活跃会话池看门狗 (Watchdog: 超过 10 分钟没有任何更新的僵尸会话自动平滑清理)
                     let pool_len_before = state.active_sessions_pool.len();
                     state.active_sessions_pool.retain(|item| {
-                        item.last_update_time.elapsed() < Duration::from_secs(25)
+                        item.last_update_time.elapsed() < Duration::from_secs(600)
                     });
                     if state.active_sessions_pool.is_empty() && pool_len_before > 0 {
                         // 活跃池被驱逐清空，若当前停留在 Working 或 Started 状态，平滑切回 Idle
