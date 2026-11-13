@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 use std::time::Instant;
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum NoiseFilterLevel {
     Silent,   // 极简：仅关键节点与完成提示
+    #[default]
     Normal,   // 默认：聚合防抖（600-1000ms），展示关键里程碑
     Verbose,  // 详细：所有具体子动作
 }

@@ -12,12 +12,14 @@ use crossbeam_channel::Sender;
 use serde_json::Value;
 
 use crate::core::bus::{AgentEvent, NoiseFilterLevel};
+use crate::core::config::SharedNoiseFilter;
 
 pub struct AntigravityWatcher {
     brain_dir: PathBuf,
     sender: Sender<AgentEvent>,
     running: Arc<AtomicBool>,
     filter_level: NoiseFilterLevel,
+    shared_filter: SharedNoiseFilter,
 }
 
 struct SessionTrackInfo {
@@ -52,11 +54,18 @@ impl AntigravityWatcher {
             sender,
             running: Arc::new(AtomicBool::new(false)),
             filter_level: NoiseFilterLevel::Normal,
+            shared_filter: SharedNoiseFilter::new(NoiseFilterLevel::Normal),
         })
     }
 
     pub fn set_filter_level(&mut self, level: NoiseFilterLevel) {
         self.filter_level = level;
+        self.shared_filter.set(level);
+    }
+
+    pub fn set_shared_filter(&mut self, filter: SharedNoiseFilter) {
+        self.filter_level = filter.get();
+        self.shared_filter = filter;
     }
 
     pub fn start(&mut self) {
@@ -64,12 +73,12 @@ impl AntigravityWatcher {
         let brain_dir = self.brain_dir.clone();
         let sender = self.sender.clone();
         let running = self.running.clone();
-        let filter_level = self.filter_level;
+        let shared_filter = self.shared_filter.clone();
 
         thread::Builder::new()
             .name("antigravity-watcher".into())
             .spawn(move || {
-                Self::run_loop(brain_dir, sender, running, filter_level);
+                Self::run_loop(brain_dir, sender, running, shared_filter);
             })
             .expect("Failed to spawn Antigravity watcher thread");
     }
@@ -78,11 +87,25 @@ impl AntigravityWatcher {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    fn should_emit_working(
+        filter_level: NoiseFilterLevel,
+        last_event_time: Instant,
+        now: Instant,
+    ) -> bool {
+        match filter_level {
+            NoiseFilterLevel::Silent => false,
+            NoiseFilterLevel::Verbose => true,
+            NoiseFilterLevel::Normal => {
+                now.saturating_duration_since(last_event_time) >= Duration::from_millis(600)
+            }
+        }
+    }
+
     fn run_loop(
         brain_dir: PathBuf,
         sender: Sender<AgentEvent>,
         running: Arc<AtomicBool>,
-        filter_level: NoiseFilterLevel,
+        shared_filter: SharedNoiseFilter,
     ) {
         println!("[Watcher] Antigravity Three-Beat Rhythm Engine active: {:?}", brain_dir);
 
@@ -212,13 +235,12 @@ impl AntigravityWatcher {
                         } else if step_updated && track.is_working {
                             // 2. 【执行静默期】：仅在后台更新进度，绝不弹窗打扰用户
                             let now = Instant::now();
-                            let should_emit = match filter_level {
-                                NoiseFilterLevel::Silent => false,
-                                NoiseFilterLevel::Verbose => true,
-                                NoiseFilterLevel::Normal => {
-                                    now.duration_since(track.last_event_time) >= Duration::from_millis(600)
-                                }
-                            };
+                            let current_filter = shared_filter.get();
+                            let should_emit = Self::should_emit_working(
+                                current_filter,
+                                track.last_event_time,
+                                now,
+                            );
 
                             if should_emit {
                                 track.last_event_time = now;
@@ -1013,5 +1035,111 @@ mod tests {
         assert!(track.is_working);
         assert!(track.last_model_finished_time.is_some());
         assert!(!track.final_summary_candidate.is_empty());
+    }
+
+    #[test]
+    fn test_should_emit_working_by_filter_level() {
+        let now = Instant::now();
+        let recent = now - Duration::from_millis(200);
+        let stale = now - Duration::from_millis(650);
+
+        assert!(!AntigravityWatcher::should_emit_working(NoiseFilterLevel::Silent, stale, now));
+        assert!(AntigravityWatcher::should_emit_working(NoiseFilterLevel::Verbose, recent, now));
+        assert!(!AntigravityWatcher::should_emit_working(NoiseFilterLevel::Normal, recent, now));
+        assert!(AntigravityWatcher::should_emit_working(NoiseFilterLevel::Normal, stale, now));
+    }
+
+    #[test]
+    fn test_watcher_shared_filter_wiring_and_live_switch() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+
+        static TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        if let Ok(mut watcher) = AntigravityWatcher::new(tx.clone()) {
+            assert_eq!(watcher.shared_filter.get(), NoiseFilterLevel::Normal);
+
+            watcher.set_filter_level(NoiseFilterLevel::Silent);
+            assert_eq!(watcher.shared_filter.get(), NoiseFilterLevel::Silent);
+
+            let external = SharedNoiseFilter::new(NoiseFilterLevel::Verbose);
+            watcher.set_shared_filter(external.clone());
+            assert_eq!(watcher.shared_filter.get(), NoiseFilterLevel::Verbose);
+
+            external.set(NoiseFilterLevel::Normal);
+            assert_eq!(watcher.shared_filter.get(), NoiseFilterLevel::Normal);
+        }
+
+        // 验证 run_loop 在运行期间无需重启即可响应 SharedNoiseFilter 的实时切换
+        let root = std::env::temp_dir().join(format!(
+            "wnoobar_live_filter_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let brain_dir = root.join("brain");
+        let sess_dir = brain_dir.join("sub-live-filter");
+        let logs_dir = sess_dir.join(".system_generated").join("logs");
+        let msg_dir = sess_dir.join(".system_generated").join("messages");
+        fs::create_dir_all(&logs_dir).expect("create logs dir");
+        fs::create_dir_all(&msg_dir).expect("create messages dir");
+        fs::write(msg_dir.join("task.json"), "{}").expect("create subagent marker");
+
+        let log_file = logs_dir.join("transcript.jsonl");
+        let line1 = json!({
+            "step_index": 1,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "<USER_REQUEST>live filter check</USER_REQUEST>"
+        });
+        fs::write(&log_file, format!("{}\n", line1)).expect("write initial log");
+
+        let running = Arc::new(AtomicBool::new(true));
+        let live_filter = SharedNoiseFilter::new(NoiseFilterLevel::Silent);
+
+        let bg_brain = brain_dir.clone();
+        let bg_running = running.clone();
+        let bg_filter = live_filter.clone();
+        let handle = thread::spawn(move || {
+            AntigravityWatcher::run_loop(bg_brain, tx, bg_running, bg_filter);
+        });
+
+        let ev1 = rx.recv_timeout(Duration::from_secs(5)).expect("should receive TaskStarted");
+        assert!(matches!(ev1, AgentEvent::TaskStarted { .. }));
+
+        // 在不重启 run_loop 的情况下，从 Silent 实时切换到 Verbose
+        live_filter.set(NoiseFilterLevel::Verbose);
+
+        let line2 = json!({
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{
+                "name": "view_file",
+                "args": { "AbsolutePath": "src/core/config.rs" }
+            }]
+        });
+        {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&log_file)
+                .expect("open log for append");
+            writeln!(file, "{}", line2).expect("append tool call line");
+            file.flush().expect("flush log");
+        }
+
+        let ev2 = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("should immediately emit Working after live switch to Verbose");
+        match ev2 {
+            AgentEvent::Working { step_index, .. } => assert_eq!(step_index, 2),
+            other => panic!("Expected Working event, got {:?}", other),
+        }
+
+        running.store(false, Ordering::SeqCst);
+        handle.join().expect("run_loop thread should exit cleanly");
+        let _ = fs::remove_dir_all(&root);
     }
 }
