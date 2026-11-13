@@ -59,6 +59,18 @@ pub enum AgentEvent {
         agent_name: String,
         prompt: String,
     },
+    /// Swarm 子智能体增量状态事件（归并至 Swarm 组，不污染主会话池）
+    SubagentStatus {
+        group_key: String,
+        parent_session_id: Option<String>,
+        worker_id: String,
+        worker_name: String,
+        project_name: String,
+        agent_name: String,
+        status: crate::core::swarm::SwarmWorkerStatus,
+        task_summary: String,
+        step_index: u64,
+    },
     SwitchSession(String),
     ResetIdle,
 }

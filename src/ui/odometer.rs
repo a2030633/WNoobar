@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use std::time::Instant;
 
+use crate::core::swarm::SwarmSummary;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveSessionItem {
     pub session_id: String,
@@ -11,6 +13,7 @@ pub struct ActiveSessionItem {
     pub step_index: u64,
     pub start_time: Instant,
     pub last_update_time: Instant,
+    pub swarm: Option<SwarmSummary>,
 }
 
 pub struct OdometerCarousel {

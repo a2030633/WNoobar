@@ -9,33 +9,51 @@ use std::thread;
 use std::time::Duration;
 
 use core::bus::{AgentEvent, EventBus};
+use core::config::{AppConfig, SharedNoiseFilter};
 use core::watcher::{
     AntigravityWatcher, ClaudeWatcher, CodexWatcher, CopilotWatcher, CursorWatcher, DeepSeekWatcher,
     GrokWatcher, OpenCodeWatcher,
 };
+use win32::window::WM_WNOOBAR_WAKE;
 use win32::{GdiplusContext, IslandWindow};
 
 fn main() {
+    // 0. 单实例保护：若已有实例在运行，唤醒已有灵动岛后优雅退出
+    let Some(_instance_guard) = win32::system::acquire_single_instance_lock() else {
+        println!("[Init] Existing WNoobar instance detected; waking island and exiting.");
+        win32::system::wake_existing_instance(WM_WNOOBAR_WAKE);
+        return;
+    };
+
     println!("==================================================");
     println!("     WNoobar (Windows AI Agent Dynamic Island)    ");
-    println!("       Version 1.1.0 (8-Agent Ecosystem)          ");
+    println!("       Version 1.2.0 (8-Agent Ecosystem)          ");
     println!("==================================================");
 
-    // 1. 初始化 Windows GDI+ 原生渲染子系统
+    // 1. 加载持久化配置，并与注册表真实开机自启状态校准
+    let mut app_config = AppConfig::load();
+    app_config.auto_start = win32::system::is_autostart_enabled();
+    let shared_filter = SharedNoiseFilter::new(app_config.noise_level);
+
+    // 2. 初始化 Windows GDI+ 原生渲染子系统
     let _gdiplus = GdiplusContext::init().expect("Failed to initialize GDI+");
     println!("[Init] GDI+ Graphics Subsystem Initialized (Retina ClearType Ready).");
 
-    // 2. 初始化核心事件总线
+    // 3. 初始化核心事件总线
     let bus = EventBus::new();
     let tx = bus.sender();
     let rx = bus.receiver().clone();
 
-    // 3. 启动 6 大 AI 助手状态引擎监听器（容错热插拔模式）
-    // 3.1 Antigravity
+    // 4. 启动 8 大 AI 助手状态引擎监听器（容错热插拔模式）
+    // 4.1 Antigravity
     match AntigravityWatcher::new(tx.clone()) {
         Ok(mut watcher) => {
+            watcher.set_shared_filter(shared_filter.clone());
             watcher.start();
-            println!("[Watcher] Antigravity monitor started.");
+            println!(
+                "[Watcher] Antigravity monitor started (NoiseLevel: {:?}).",
+                shared_filter.get()
+            );
         }
         Err(e) => {
             println!("[Watcher] Antigravity monitor skipped: {e}");
@@ -196,8 +214,9 @@ fn main() {
 
     // 5. 创建并显示原生悬浮穿透灵动岛
     println!("[UI] Creating Topmost Click-Through Layered Island Window (Retina Enabled)...");
-    let window = IslandWindow::new(rx).expect("Failed to create Island Window");
-    println!("[UI] WNoobar window is active at top center of primary display.");
+    let window = IslandWindow::new_with_config(rx, app_config, shared_filter)
+        .expect("Failed to create Island Window");
+    println!("[UI] WNoobar window is active at top center of target display.");
     println!("[UI] Default state: Edge Peeking (nearly invisible 2.5px strip).");
     println!("[UI] Press Ctrl+C in console to terminate.");
 

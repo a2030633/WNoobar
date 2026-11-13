@@ -1,11 +1,115 @@
 #![allow(dead_code)]
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::time::Instant;
 
 use crate::core::fsm::{EdgeDockMode, FlipTransition, IslandState};
+use crate::core::swarm::{SwarmSummary, SwarmWorkerInfo, SwarmWorkerStatus};
 use crate::ui::glyphs::{AgentBrand, GlyphManager};
 use crate::ui::odometer::{ActiveSessionItem, OdometerCarousel};
 use crate::win32::gdiplus::*;
+
+/// 解析当前焦点 Swarm 在 `active_sessions` 中的下标（渲染与点击跳转共用的**唯一**优先级策略，所见即所点）：
+/// 1. 轮播激活（`len >= 2` 且非 `ActionNeeded`/`Done`）时，先取 `active_sessions[odometer.active_index % len]`，
+///    其含 `swarm` 则直接命中；不含时仅在 `SwarmExpanded` 下继续回退，其余模式返回 `None`；
+/// 2. 否则按状态 `session_id`（含 `group_key` 与 `parent_session_id`）匹配，其次按 `(project_name, agent_name)` 匹配；
+/// 3. 多会话时回退至当前轮播焦点；`Idle` 或 `SwarmExpanded` 最终回退至首个含 `swarm` 的条目。
+pub fn resolve_focused_swarm_index(
+    state: &IslandState,
+    active_sessions: &[ActiveSessionItem],
+    odometer: &OdometerCarousel,
+    dock_mode: EdgeDockMode,
+) -> Option<usize> {
+    let len = active_sessions.len();
+    if len == 0 {
+        return None;
+    }
+    let odo_idx = odometer.active_index % len;
+    let rotation_active = len >= 2
+        && !matches!(
+            state,
+            IslandState::ActionNeeded { .. } | IslandState::Done { .. }
+        );
+    if rotation_active {
+        if active_sessions[odo_idx].swarm.is_some() {
+            return Some(odo_idx);
+        }
+        if dock_mode != EdgeDockMode::SwarmExpanded {
+            return None;
+        }
+    }
+
+    let state_meta = match state {
+        IslandState::Started {
+            session_id,
+            project_name,
+            agent_name,
+            ..
+        }
+        | IslandState::Working {
+            session_id,
+            project_name,
+            agent_name,
+            ..
+        }
+        | IslandState::ActionNeeded {
+            session_id,
+            project_name,
+            agent_name,
+            ..
+        }
+        | IslandState::Done {
+            session_id,
+            project_name,
+            agent_name,
+            ..
+        } => Some((
+            session_id.as_str(),
+            project_name.as_str(),
+            agent_name.as_str(),
+        )),
+        IslandState::Idle => None,
+    };
+
+    if let Some((sid, project, agent)) = state_meta {
+        if let Some(i) = active_sessions.iter().position(|item| {
+            item.swarm.as_ref().is_some_and(|s| {
+                item.session_id == sid
+                    || s.group_key == sid
+                    || s.parent_session_id.as_deref() == Some(sid)
+            })
+        }) {
+            return Some(i);
+        }
+        if let Some(i) = active_sessions.iter().position(|item| {
+            item.swarm.as_ref().is_some_and(|s| {
+                (item.project_name == project && item.agent_name == agent)
+                    || (s.project_name == project && s.agent_name == agent)
+            })
+        }) {
+            return Some(i);
+        }
+    }
+
+    if len >= 2 && active_sessions[odo_idx].swarm.is_some() {
+        return Some(odo_idx);
+    }
+    if state_meta.is_none() || dock_mode == EdgeDockMode::SwarmExpanded {
+        return active_sessions.iter().position(|item| item.swarm.is_some());
+    }
+    None
+}
+
+/// 解析当前焦点对应的活跃 Swarm 摘要（策略见 [`resolve_focused_swarm_index`]）。
+pub fn resolve_focused_swarm<'a>(
+    state: &IslandState,
+    active_sessions: &'a [ActiveSessionItem],
+    odometer: &OdometerCarousel,
+    dock_mode: EdgeDockMode,
+) -> Option<&'a SwarmSummary> {
+    resolve_focused_swarm_index(state, active_sessions, odometer, dock_mode)
+        .and_then(|i| active_sessions[i].swarm.as_ref())
+}
 
 pub struct CapsuleRenderer {
     font_family_ui: *mut c_void,
@@ -273,20 +377,56 @@ impl CapsuleRenderer {
             GdipDeleteBrush(pad_brush);
 
             // 3. 几何圆角自适应
-            let radius = if dock_mode == EdgeDockMode::DeckExpanded {
+            let radius = if matches!(
+                dock_mode,
+                EdgeDockMode::DeckExpanded | EdgeDockMode::SwarmExpanded
+            ) {
                 22.0
             } else {
                 (cap_h / 2.0).clamp(2.0, 20.0)
             };
 
+            let expanded_swarm = if dock_mode == EdgeDockMode::SwarmExpanded {
+                resolve_focused_swarm(state, active_sessions, odometer, dock_mode)
+            } else {
+                None
+            };
+            let normal_swarm = if dock_mode == EdgeDockMode::Normal {
+                resolve_focused_swarm(state, active_sessions, odometer, dock_mode)
+            } else {
+                None
+            };
+            let active_swarm_has_action = expanded_swarm
+                .or(normal_swarm)
+                .is_some_and(|s| s.action_count > 0);
+
             // 4. 外部环境柔光 (Glow) - 展开时平滑增强
             if morph > 0.1 {
                 let glow_base = match state {
-                    IslandState::Idle => (20, 255, 255, 255),
-                    IslandState::Started { .. } => (60, 0, 160, 255),
+                    IslandState::Idle => {
+                        if active_swarm_has_action {
+                            let a = (70.0 + 25.0 * self.pulse_phase.sin()) as u8;
+                            (a, 255, 149, 0)
+                        } else {
+                            (20, 255, 255, 255)
+                        }
+                    }
+                    IslandState::Started { .. } => {
+                        if active_swarm_has_action {
+                            let a = (70.0 + 25.0 * self.pulse_phase.sin()) as u8;
+                            (a, 255, 149, 0)
+                        } else {
+                            (60, 0, 160, 255)
+                        }
+                    }
                     IslandState::Working { .. } => {
-                        let a = (50.0 + 25.0 * self.pulse_phase.sin()) as u8;
-                        (a, 0, 160, 255)
+                        if active_swarm_has_action {
+                            let a = (70.0 + 25.0 * self.pulse_phase.sin()) as u8;
+                            (a, 255, 149, 0)
+                        } else {
+                            let a = (50.0 + 25.0 * self.pulse_phase.sin()) as u8;
+                            (a, 0, 160, 255)
+                        }
                     }
                     IslandState::Done { .. } => (55, 46, 204, 113),
                     IslandState::ActionNeeded { .. } => {
@@ -315,7 +455,10 @@ impl CapsuleRenderer {
             if !path.is_null() {
                 add_round_rect_to_path(path, cap_x, cap_y, cap_w, cap_h, radius);
 
-                let body_color = if dock_mode == EdgeDockMode::DeckExpanded {
+                let body_color = if matches!(
+                    dock_mode,
+                    EdgeDockMode::DeckExpanded | EdgeDockMode::SwarmExpanded
+                ) {
                     make_argb(248, 14, 14, 16)
                 } else {
                     let a = (210.0 + 42.0 * morph) as u8;
@@ -368,6 +511,12 @@ impl CapsuleRenderer {
 
                 if dock_mode == EdgeDockMode::DeckExpanded {
                     self.render_deck_view(graphics, cap_x, cap_y, cap_w, cap_h, recent_sessions);
+                } else if dock_mode == EdgeDockMode::SwarmExpanded {
+                    if let Some(swarm) = expanded_swarm {
+                        self.render_swarm_expanded_view(graphics, cap_x, cap_y, cap_w, cap_h, swarm);
+                    } else {
+                        self.render_deck_view(graphics, cap_x, cap_y, cap_w, cap_h, recent_sessions);
+                    }
                 } else if active_sessions.len() >= 2 && !matches!(state, IslandState::Done { .. } | IslandState::ActionNeeded { .. }) {
                     // 当处于多会话并发时，自动激活里程表式垂直滚轮换页！
                     self.render_odometer_view(graphics, cap_x, cap_y, cap_w, cap_h, active_sessions, odometer);
@@ -377,10 +526,22 @@ impl CapsuleRenderer {
                             self.render_idle_state(graphics, cap_x, cap_y, cap_w, cap_h);
                         }
                         IslandState::Started { project_name, role_type, agent_name, task_summary, .. } => {
-                            self.render_working_state(graphics, cap_x, cap_y, cap_w, cap_h, project_name, role_type, agent_name, task_summary, 0);
+                            if let Some(swarm) = normal_swarm {
+                                self.render_swarm_compact_row(
+                                    graphics, cap_x, cap_y, cap_w, cap_h, project_name, agent_name, swarm, 1.0,
+                                );
+                            } else {
+                                self.render_working_state(graphics, cap_x, cap_y, cap_w, cap_h, project_name, role_type, agent_name, task_summary, 0);
+                            }
                         }
                         IslandState::Working { project_name, role_type, agent_name, task_summary, step_index, .. } => {
-                            self.render_working_state(graphics, cap_x, cap_y, cap_w, cap_h, project_name, role_type, agent_name, task_summary, *step_index);
+                            if let Some(swarm) = normal_swarm {
+                                self.render_swarm_compact_row(
+                                    graphics, cap_x, cap_y, cap_w, cap_h, project_name, agent_name, swarm, 1.0,
+                                );
+                            } else {
+                                self.render_working_state(graphics, cap_x, cap_y, cap_w, cap_h, project_name, role_type, agent_name, task_summary, *step_index);
+                            }
                         }
                         IslandState::Done { project_name, role_type, agent_name, summary, duration_secs, artifacts_count, .. } => {
                             self.render_done_state(graphics, cap_x, cap_y, cap_w, cap_h, project_name, role_type, agent_name, summary, *duration_secs, *artifacts_count);
@@ -559,25 +720,54 @@ impl CapsuleRenderer {
                 let prev_item = &sessions[odometer.prev_index % count];
 
                 // 1. 向上滚出胶囊顶部的上一会话 (translateY = prev_offset)
-                self.render_odometer_single_row(
-                    graphics, x, y + prev_offset, w, h,
-                    &prev_item.project_name, &prev_item.role_type, &prev_item.agent_name,
-                    &prev_item.task_summary, prev_item.step_index, 1.0,
-                );
+                self.render_odometer_item(graphics, x, y + prev_offset, w, h, prev_item, 1.0);
 
                 // 2. 从胶囊底部向上滚入的当前会话 (translateY = curr_offset)
-                self.render_odometer_single_row(
-                    graphics, x, y + curr_offset, w, h,
-                    &curr_item.project_name, &curr_item.role_type, &curr_item.agent_name,
-                    &curr_item.task_summary, curr_item.step_index, 1.0,
-                );
+                self.render_odometer_item(graphics, x, y + curr_offset, w, h, curr_item, 1.0);
             } else {
                 // 3. 驻留态与卡槽落地微弹强调 (Landing Scale Bounce)
                 let scale = odometer.landing_scale();
+                self.render_odometer_item(graphics, x, y, w, h, curr_item, scale);
+            }
+        }
+    }
+
+    unsafe fn render_odometer_item(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        item: &ActiveSessionItem,
+        scale: f32,
+    ) {
+        unsafe {
+            if let Some(swarm) = item.swarm.as_ref() {
+                self.render_swarm_compact_row(
+                    graphics,
+                    x,
+                    y,
+                    w,
+                    h,
+                    &item.project_name,
+                    &item.agent_name,
+                    swarm,
+                    scale,
+                );
+            } else {
                 self.render_odometer_single_row(
-                    graphics, x, y, w, h,
-                    &curr_item.project_name, &curr_item.role_type, &curr_item.agent_name,
-                    &curr_item.task_summary, curr_item.step_index, scale,
+                    graphics,
+                    x,
+                    y,
+                    w,
+                    h,
+                    &item.project_name,
+                    &item.role_type,
+                    &item.agent_name,
+                    &item.task_summary,
+                    item.step_index,
+                    scale,
                 );
             }
         }
@@ -1059,6 +1249,911 @@ impl CapsuleRenderer {
             }
         }
     }
+
+    unsafe fn draw_text_line(
+        &self,
+        graphics: *mut c_void,
+        font: *mut c_void,
+        text: &str,
+        rect: RectF,
+        color: u32,
+    ) {
+        unsafe {
+            if rect.width <= 1.0 || rect.height <= 1.0 || font.is_null() {
+                return;
+            }
+            let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(color, &mut brush);
+            if !brush.is_null() {
+                GdipDrawString(
+                    graphics,
+                    utf16.as_ptr(),
+                    utf16.len() as i32 - 1,
+                    font,
+                    &rect,
+                    self.format_single_line,
+                    brush,
+                );
+                GdipDeleteBrush(brush);
+            }
+        }
+    }
+
+    fn format_swarm_elapsed(secs: u64) -> String {
+        if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else {
+            format!("{:02}:{:02}", secs / 60, secs % 60)
+        }
+    }
+
+    fn swarm_status_color(&self, status: SwarmWorkerStatus, animated_dot: bool) -> u32 {
+        match status {
+            SwarmWorkerStatus::ActionNeeded => {
+                if animated_dot {
+                    let a = (195.0 + 60.0 * self.pulse_phase.sin())
+                        .round()
+                        .clamp(120.0, 255.0) as u8;
+                    make_argb(a, 255, 149, 0)
+                } else {
+                    make_argb(245, 255, 149, 0)
+                }
+            }
+            SwarmWorkerStatus::Working => {
+                if animated_dot {
+                    let a = (175.0 + 80.0 * self.pulse_phase.sin())
+                        .round()
+                        .clamp(95.0, 255.0) as u8;
+                    make_argb(a, 10, 185, 255)
+                } else {
+                    make_argb(235, 10, 185, 255)
+                }
+            }
+            SwarmWorkerStatus::Done => make_argb(245, 52, 211, 153),
+            SwarmWorkerStatus::Waiting => make_argb(120, 165, 175, 190),
+        }
+    }
+
+    /// 绘制单颗圆形状态指示灯
+    unsafe fn draw_dot(&self, graphics: *mut c_void, x: f32, y: f32, size: f32, color: u32) {
+        unsafe {
+            let mut brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(color, &mut brush);
+            if !brush.is_null() {
+                GdipFillEllipse(graphics, brush, x, y, size, size);
+                GdipDeleteBrush(brush);
+            }
+        }
+    }
+
+    /// 迷你状态点阵：圆角微底垫 `rgba(255,255,255,0.08)` + 最多 4 颗 `4px` 状态圆点 + 超 4 节点 `+N` 紧凑微标
+    unsafe fn draw_swarm_dot_matrix(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        row_y: f32,
+        row_h: f32,
+        swarm: &SwarmSummary,
+    ) -> f32 {
+        unsafe {
+            let mut dot_statuses: Vec<SwarmWorkerStatus> =
+                swarm.workers.iter().take(4).map(|w| w.status).collect();
+            if dot_statuses.is_empty() && swarm.total_workers > 0 {
+                for _ in 0..swarm.action_count {
+                    if dot_statuses.len() < 4 {
+                        dot_statuses.push(SwarmWorkerStatus::ActionNeeded);
+                    }
+                }
+                for _ in 0..swarm.working_count {
+                    if dot_statuses.len() < 4 {
+                        dot_statuses.push(SwarmWorkerStatus::Working);
+                    }
+                }
+                for _ in 0..swarm.done_count {
+                    if dot_statuses.len() < 4 {
+                        dot_statuses.push(SwarmWorkerStatus::Done);
+                    }
+                }
+                for _ in 0..swarm.waiting_count {
+                    if dot_statuses.len() < 4 {
+                        dot_statuses.push(SwarmWorkerStatus::Waiting);
+                    }
+                }
+            }
+
+            let dot_count = dot_statuses.len();
+            if dot_count == 0 {
+                return 0.0;
+            }
+
+            let pill_h = 16.0;
+            let pill_y = (row_y + (row_h - pill_h) / 2.0).round();
+            let dot_size = 4.0;
+            let dot_stride = 7.0;
+            let dots_w =
+                (dot_count as f32) * dot_size + ((dot_count.saturating_sub(1)) as f32) * 3.0;
+            let pill_w = (6.0 + dots_w + 6.0).round();
+
+            let mut pill_path: *mut c_void = null_mut();
+            GdipCreatePath(0, &mut pill_path);
+            if !pill_path.is_null() {
+                add_round_rect_to_path(pill_path, x, pill_y, pill_w, pill_h, 8.0);
+                let mut bg_brush: *mut c_void = null_mut();
+                GdipCreateSolidFill(make_argb(20, 255, 255, 255), &mut bg_brush);
+                if !bg_brush.is_null() {
+                    GdipFillPath(graphics, bg_brush, pill_path);
+                    GdipDeleteBrush(bg_brush);
+                }
+                GdipDeletePath(pill_path);
+            }
+
+            let dot_y = (pill_y + (pill_h - dot_size) / 2.0).round();
+            for (i, status) in dot_statuses.iter().enumerate() {
+                let dot_x = (x + 6.0 + (i as f32) * dot_stride).round();
+                let color = self.swarm_status_color(*status, true);
+                self.draw_dot(graphics, dot_x, dot_y, dot_size, color);
+            }
+
+            let total = swarm.total_workers.max(swarm.workers.len());
+            if total > 4 {
+                let plus_text = format!("+{}", total - 4);
+                let measured_plus_w = Self::measure_text_w(
+                    graphics,
+                    self.font_small,
+                    &plus_text,
+                    self.format_single_line,
+                );
+                let badge_w = (measured_plus_w + 8.0).clamp(20.0, 40.0).round();
+                let badge_x = (x + pill_w + 4.0).round();
+                self.draw_pill_tag(
+                    graphics,
+                    badge_x,
+                    pill_y,
+                    badge_w,
+                    pill_h,
+                    5.0,
+                    &plus_text,
+                    measured_plus_w,
+                    make_argb(24, 255, 255, 255),
+                    make_argb(42, 255, 255, 255),
+                    make_argb(230, 200, 212, 230),
+                );
+                (pill_w + 4.0 + badge_w).round()
+            } else {
+                pill_w
+            }
+        }
+    }
+
+    /// 按状态占比绘制底部贴边 `2px` 分段聚合微进度条
+    unsafe fn draw_swarm_ratio_bar(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        swarm: &SwarmSummary,
+    ) {
+        unsafe {
+            let bar_x = (x + 12.0).round();
+            let bar_w = (w - 24.0).max(16.0).round();
+            let bar_y = (y + h - 2.0).round();
+            self.draw_swarm_ratio_bar_at(graphics, bar_x, bar_y, bar_w, 2.0, swarm);
+        }
+    }
+
+    unsafe fn draw_swarm_ratio_bar_at(
+        &self,
+        graphics: *mut c_void,
+        bar_x: f32,
+        bar_y: f32,
+        bar_w: f32,
+        bar_h: f32,
+        swarm: &SwarmSummary,
+    ) {
+        unsafe {
+            let mut track_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(24, 255, 255, 255), &mut track_brush);
+            if !track_brush.is_null() {
+                GdipFillRectangle(graphics, track_brush, bar_x, bar_y, bar_w, bar_h);
+                GdipDeleteBrush(track_brush);
+            }
+
+            let buckets = [
+                (
+                    swarm.action_count,
+                    self.swarm_status_color(SwarmWorkerStatus::ActionNeeded, false),
+                ),
+                (
+                    swarm.working_count,
+                    self.swarm_status_color(SwarmWorkerStatus::Working, false),
+                ),
+                (
+                    swarm.done_count,
+                    self.swarm_status_color(SwarmWorkerStatus::Done, false),
+                ),
+                (
+                    swarm.waiting_count,
+                    self.swarm_status_color(SwarmWorkerStatus::Waiting, false),
+                ),
+            ];
+            let active_buckets: Vec<(usize, u32)> =
+                buckets.into_iter().filter(|(c, _)| *c > 0).collect();
+            let total: usize = active_buckets.iter().map(|(c, _)| *c).sum();
+            if total == 0 || active_buckets.is_empty() {
+                return;
+            }
+
+            let gap = if active_buckets.len() > 1 && bar_w > 24.0 {
+                2.0
+            } else {
+                0.0
+            };
+            let usable_w =
+                (bar_w - gap * (active_buckets.len().saturating_sub(1) as f32)).max(4.0);
+            let mut cur_x = bar_x;
+            for (idx, (count, color)) in active_buckets.iter().enumerate() {
+                let seg_w = if idx + 1 == active_buckets.len() {
+                    (bar_x + bar_w - cur_x).max(2.0)
+                } else {
+                    ((*count as f32 / total as f32) * usable_w)
+                        .round()
+                        .max(3.0)
+                        .min((bar_x + bar_w - cur_x).max(0.0))
+                };
+                if seg_w <= 0.0 {
+                    continue;
+                }
+                let mut seg_brush: *mut c_void = null_mut();
+                GdipCreateSolidFill(*color, &mut seg_brush);
+                if !seg_brush.is_null() {
+                    GdipFillRectangle(graphics, seg_brush, cur_x, bar_y, seg_w, bar_h);
+                    GdipDeleteBrush(seg_brush);
+                }
+                cur_x = (cur_x + seg_w + gap).round();
+            }
+        }
+    }
+
+    /// 绘制 SwarmExpanded 顶栏下方 `3px` 分段总进度条（每个 worker 按状态着色）
+    unsafe fn draw_swarm_worker_bar(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        swarm: &SwarmSummary,
+    ) {
+        unsafe {
+            let bar_x = (x + 16.0).round();
+            let bar_w = (w - 32.0).max(20.0).round();
+            let bar_y = (y + 30.0).round();
+            let bar_h = 3.0;
+
+            let n = swarm.workers.len();
+            if n == 0 {
+                self.draw_swarm_ratio_bar_at(graphics, bar_x, bar_y, bar_w, bar_h, swarm);
+                return;
+            }
+
+            let mut track_brush: *mut c_void = null_mut();
+            GdipCreateSolidFill(make_argb(26, 255, 255, 255), &mut track_brush);
+            if !track_brush.is_null() {
+                GdipFillRectangle(graphics, track_brush, bar_x, bar_y, bar_w, bar_h);
+                GdipDeleteBrush(track_brush);
+            }
+
+            let per_cell = bar_w / (n as f32);
+            let gap = if n <= 1 {
+                0.0
+            } else if per_cell >= 12.0 {
+                2.0
+            } else if per_cell >= 5.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let usable_w = (bar_w - gap * ((n - 1) as f32)).max(n as f32);
+            let step = usable_w / (n as f32) + gap;
+
+            for (i, worker) in swarm.workers.iter().enumerate() {
+                let seg_x = if i == 0 {
+                    bar_x
+                } else {
+                    (bar_x + (i as f32) * step).round()
+                };
+                let next_x = if i + 1 == n {
+                    bar_x + bar_w
+                } else {
+                    (bar_x + ((i + 1) as f32) * step - gap).round()
+                };
+                let seg_w = (next_x - seg_x).max(1.0);
+                let color = self.swarm_status_color(worker.status, false);
+                let mut seg_brush: *mut c_void = null_mut();
+                GdipCreateSolidFill(color, &mut seg_brush);
+                if !seg_brush.is_null() {
+                    GdipFillRectangle(graphics, seg_brush, seg_x, bar_y, seg_w, bar_h);
+                    GdipDeleteBrush(seg_brush);
+                }
+            }
+        }
+    }
+
+    /// 折叠胶囊态紧凑 Swarm 聚合行（复用在 Normal 与 Odometer 滚轮视图中）
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn render_swarm_compact_row(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        project: &str,
+        agent: &str,
+        swarm: &SwarmSummary,
+        scale: f32,
+    ) {
+        unsafe {
+            let mut g_state: u32 = 0;
+            let need_scale = (scale - 1.0).abs() > 0.001;
+            if need_scale {
+                GdipSaveGraphics(graphics, &mut g_state);
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                GdipTranslateWorldTransform(graphics, cx, cy, MATRIX_ORDER_PREPEND);
+                GdipScaleWorldTransform(graphics, scale, scale, MATRIX_ORDER_PREPEND);
+                GdipTranslateWorldTransform(graphics, -cx, -cy, MATRIX_ORDER_PREPEND);
+            }
+
+            let agent_name = if !agent.is_empty() {
+                agent
+            } else {
+                &swarm.agent_name
+            };
+            let brand = AgentBrand::from_name(agent_name);
+            let glyph_x = (x + 18.0).round();
+            let glyph_y = (y + h / 2.0).round();
+            self.glyph_manager
+                .draw(graphics, brand, glyph_x, glyph_y, 18.0, self.pulse_phase);
+
+            let text_y = (y + (h - 18.0) / 2.0).round();
+            let text_h = 18.0;
+
+            // 第一段：[项目名] · Swarm
+            let proj_name = if !project.is_empty() {
+                project
+            } else if !swarm.project_name.is_empty() {
+                &swarm.project_name
+            } else {
+                "WNoobar"
+            };
+            let mut cur_x = (glyph_x + 14.0).round();
+            let measured_proj_w = Self::measure_text_w(
+                graphics,
+                self.font_title,
+                proj_name,
+                self.format_single_line,
+            );
+            let proj_w = measured_proj_w.clamp(20.0, 74.0).round();
+            self.draw_text_line(
+                graphics,
+                self.font_title,
+                proj_name,
+                RectF {
+                    x: cur_x,
+                    y: text_y,
+                    width: proj_w,
+                    height: text_h,
+                },
+                make_argb(255, 255, 255, 255),
+            );
+            cur_x = (cur_x + proj_w + 5.0).round();
+
+            let dot_w = 6.0;
+            self.draw_text_line(
+                graphics,
+                self.font_body,
+                "·",
+                RectF {
+                    x: cur_x,
+                    y: text_y,
+                    width: dot_w,
+                    height: text_h,
+                },
+                make_argb(180, 165, 170, 180),
+            );
+            cur_x = (cur_x + dot_w + 5.0).round();
+
+            let swarm_label = "Swarm";
+            let swarm_color = if swarm.action_count > 0 {
+                make_argb(255, 255, 149, 0)
+            } else {
+                make_argb(255, 10, 185, 255)
+            };
+            let measured_swarm_w = Self::measure_text_w(
+                graphics,
+                self.font_title,
+                swarm_label,
+                self.format_single_line,
+            );
+            let swarm_w = measured_swarm_w.clamp(36.0, 52.0).round();
+            self.draw_text_line(
+                graphics,
+                self.font_title,
+                swarm_label,
+                RectF {
+                    x: cur_x,
+                    y: text_y,
+                    width: swarm_w,
+                    height: text_h,
+                },
+                swarm_color,
+            );
+            cur_x = (cur_x + swarm_w + 6.0).round();
+
+            // 迷你状态点阵
+            let matrix_w = self.draw_swarm_dot_matrix(graphics, cur_x, y, h, swarm);
+            if matrix_w > 0.0 {
+                cur_x = (cur_x + matrix_w + 8.0).round();
+            }
+
+            // 第二段：聚合摘要 + 重点子代理单行摘要（严格防止右侧溢出）
+            let avail_w = (x + w - cur_x - 16.0).max(0.0).round();
+            if avail_w >= 18.0 {
+                let agg_text = swarm.aggregate_summary.trim();
+                let agg_color = if swarm.action_count > 0 {
+                    make_argb(255, 255, 179, 64)
+                } else {
+                    make_argb(245, 225, 232, 245)
+                };
+                let measured_agg_w = Self::measure_text_w(
+                    graphics,
+                    self.font_body,
+                    agg_text,
+                    self.format_single_line,
+                );
+                let agg_w = measured_agg_w.round();
+
+                if let Some(focus) = swarm.workers.first() {
+                    if avail_w > agg_w + 54.0 {
+                        self.draw_text_line(
+                            graphics,
+                            self.font_body,
+                            agg_text,
+                            RectF {
+                                x: cur_x,
+                                y: text_y,
+                                width: agg_w,
+                                height: text_h,
+                            },
+                            agg_color,
+                        );
+                        cur_x = (cur_x + agg_w + 5.0).round();
+
+                        self.draw_text_line(
+                            graphics,
+                            self.font_body,
+                            "·",
+                            RectF {
+                                x: cur_x,
+                                y: text_y,
+                                width: dot_w,
+                                height: text_h,
+                            },
+                            make_argb(165, 165, 175, 190),
+                        );
+                        cur_x = (cur_x + dot_w + 5.0).round();
+
+                        let focus_name = if focus.display_name.trim().is_empty() {
+                            "@worker".to_string()
+                        } else if focus.display_name.trim().starts_with('@') {
+                            focus.display_name.trim().to_string()
+                        } else {
+                            format!("@{}", focus.display_name.trim())
+                        };
+                        let focus_summary = focus.task_summary.trim();
+                        let focus_text = if focus_summary.is_empty() {
+                            focus_name
+                        } else {
+                            format!("{} {}", focus_name, focus_summary)
+                        };
+                        let focus_w = (x + w - cur_x - 16.0).max(16.0).round();
+                        self.draw_text_line(
+                            graphics,
+                            self.font_body,
+                            &focus_text,
+                            RectF {
+                                x: cur_x,
+                                y: text_y,
+                                width: focus_w,
+                                height: text_h,
+                            },
+                            make_argb(215, 188, 198, 214),
+                        );
+                    } else {
+                        self.draw_text_line(
+                            graphics,
+                            self.font_body,
+                            agg_text,
+                            RectF {
+                                x: cur_x,
+                                y: text_y,
+                                width: avail_w,
+                                height: text_h,
+                            },
+                            agg_color,
+                        );
+                    }
+                } else {
+                    self.draw_text_line(
+                        graphics,
+                        self.font_body,
+                        agg_text,
+                        RectF {
+                            x: cur_x,
+                            y: text_y,
+                            width: avail_w,
+                            height: text_h,
+                        },
+                        agg_color,
+                    );
+                }
+            }
+
+            // 底部贴边 2px 分段聚合微进度条
+            self.draw_swarm_ratio_bar(graphics, x, y, w, h, swarm);
+
+            if need_scale {
+                GdipRestoreGraphics(graphics, g_state);
+            }
+        }
+    }
+
+    fn format_worker_meta(worker: &SwarmWorkerInfo, now: Instant) -> String {
+        let elapsed_secs = match worker.status {
+            SwarmWorkerStatus::Done => worker
+                .last_update
+                .saturating_duration_since(worker.started_at)
+                .as_secs(),
+            SwarmWorkerStatus::Waiting => 0,
+            SwarmWorkerStatus::Working | SwarmWorkerStatus::ActionNeeded => now
+                .saturating_duration_since(worker.started_at)
+                .max(worker.last_update.saturating_duration_since(worker.started_at))
+                .as_secs(),
+        };
+        let dur = Self::format_swarm_elapsed(elapsed_secs);
+        match worker.status {
+            SwarmWorkerStatus::Waiting => "待命中".to_string(),
+            SwarmWorkerStatus::Done => {
+                if worker.step_index > 0 {
+                    format!("第 {} 步 · {} · 完成", worker.step_index, dur)
+                } else {
+                    format!("已完成 · {}", dur)
+                }
+            }
+            SwarmWorkerStatus::ActionNeeded => {
+                if worker.step_index > 0 {
+                    format!("⚠ 第 {} 步 · {}", worker.step_index, dur)
+                } else {
+                    format!("⚠ 待确认 · {}", dur)
+                }
+            }
+            SwarmWorkerStatus::Working => {
+                if worker.step_index > 0 {
+                    format!("第 {} 步 · {}", worker.step_index, dur)
+                } else {
+                    format!("运行中 · {}", dur)
+                }
+            }
+        }
+    }
+
+    /// 悬停展开雷达抽屉（SwarmExpanded, 440.0 × 190.0，纯只读 + 右上角唯一切回窗口微胶囊）
+    unsafe fn render_swarm_expanded_view(
+        &self,
+        graphics: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        _h: f32,
+        swarm: &SwarmSummary,
+    ) {
+        unsafe {
+            let now = Instant::now();
+            let top_y = (y + 9.0).round();
+            let top_h = 18.0;
+            let jump_y = (y + 10.0).round();
+
+            // 1. 左侧 16px 品牌图标
+            let brand = AgentBrand::from_name(&swarm.agent_name);
+            self.glyph_manager.draw(
+                graphics,
+                brand,
+                (x + 24.0).round(),
+                (y + 18.0).round(),
+                16.0,
+                self.pulse_phase,
+            );
+
+            // 2. 右上角唯一 [↗ 切回窗口] 微标签
+            let jump_text = "↗ 切回窗口";
+            let measured_jump_w = Self::measure_text_w(
+                graphics,
+                self.font_small,
+                jump_text,
+                self.format_single_line,
+            );
+            let jump_w = (measured_jump_w + 12.0).clamp(68.0, 96.0).round();
+            let jump_h = 16.0;
+            let jump_x = (x + w - jump_w - 16.0).round();
+            let (jump_bg, jump_border, jump_fg) = match (self.is_action_hovered, swarm.action_count > 0) {
+                (true, true) => (
+                    make_argb(125, 255, 159, 20),
+                    make_argb(235, 255, 215, 120),
+                    make_argb(255, 255, 250, 235),
+                ),
+                (true, false) => (
+                    make_argb(110, 10, 165, 255),
+                    make_argb(220, 100, 215, 255),
+                    make_argb(255, 245, 252, 255),
+                ),
+                (false, true) => (
+                    make_argb(65, 255, 149, 0),
+                    make_argb(145, 255, 175, 50),
+                    make_argb(255, 255, 215, 145),
+                ),
+                (false, false) => (
+                    make_argb(42, 10, 165, 255),
+                    make_argb(95, 70, 190, 255),
+                    make_argb(235, 215, 238, 255),
+                ),
+            };
+            self.draw_pill_tag(
+                graphics,
+                jump_x,
+                jump_y,
+                jump_w,
+                jump_h,
+                4.0,
+                jump_text,
+                measured_jump_w,
+                jump_bg,
+                jump_border,
+                jump_fg,
+            );
+
+            // 3. 顶栏标题 + 简洁计数/总耗时
+            let title_x = (x + 38.0).round();
+            let avail_left_w = (jump_x - 8.0 - title_x).max(40.0).round();
+            let proj_name = if swarm.project_name.is_empty() {
+                "WNoobar"
+            } else {
+                &swarm.project_name
+            };
+            let title_text = format!("{} · Swarm 雷达", proj_name);
+
+            let total = swarm.total_workers.max(swarm.workers.len());
+            let active = swarm.working_count + swarm.action_count;
+            let primary_count = if active > 0 { active } else { swarm.done_count };
+            let dur = Self::format_swarm_elapsed(swarm.elapsed_secs);
+            let mut meta_text = if swarm.action_count > 0 {
+                format!("⚠ {}/{} · {}", primary_count, total, dur)
+            } else {
+                format!("{}/{} · {}", primary_count, total, dur)
+            };
+            if total > 4 {
+                meta_text.push_str(&format!(" · +{} 节点", total - 4));
+            }
+
+            let measured_title_w = Self::measure_text_w(
+                graphics,
+                self.font_title,
+                &title_text,
+                self.format_single_line,
+            );
+            let measured_meta_w = Self::measure_text_w(
+                graphics,
+                self.font_small,
+                &meta_text,
+                self.format_single_line,
+            );
+            let (title_w, meta_w) = if measured_title_w + 8.0 + measured_meta_w <= avail_left_w {
+                (measured_title_w.round(), measured_meta_w.round())
+            } else {
+                let capped_meta = measured_meta_w.min((avail_left_w * 0.48).max(48.0)).round();
+                let remain_title = (avail_left_w - capped_meta - 8.0).max(36.0).round();
+                (remain_title, capped_meta)
+            };
+
+            self.draw_text_line(
+                graphics,
+                self.font_title,
+                &title_text,
+                RectF {
+                    x: title_x,
+                    y: top_y,
+                    width: title_w,
+                    height: top_h,
+                },
+                make_argb(255, 255, 255, 255),
+            );
+
+            let meta_x = (title_x + title_w + 8.0).round();
+            if meta_x + 20.0 <= jump_x - 8.0 {
+                let meta_color = if swarm.action_count > 0 {
+                    make_argb(255, 255, 179, 64)
+                } else {
+                    make_argb(225, 170, 192, 220)
+                };
+                self.draw_text_line(
+                    graphics,
+                    self.font_small,
+                    &meta_text,
+                    RectF {
+                        x: meta_x,
+                        y: top_y,
+                        width: (jump_x - 8.0 - meta_x).min(meta_w + 2.0).max(16.0),
+                        height: top_h,
+                    },
+                    meta_color,
+                );
+            }
+
+            // 4. 分段总进度条（y + 30, 高 3px）
+            self.draw_swarm_worker_bar(graphics, x, y, w, swarm);
+
+            // 5. 纯只读子代理轨道列表（y + 39 起，最多 4 行，row_h = 30.0, gap = 5.0，严禁放置任何按钮）
+            let start_y = (y + 39.0).round();
+            let row_h = 30.0;
+            let row_gap = 5.0;
+            let row_x = (x + 14.0).round();
+            let row_w = (w - 28.0).round();
+
+            for (i, worker) in swarm.workers.iter().take(4).enumerate() {
+                let item_y = (start_y + (i as f32) * (row_h + row_gap)).round();
+                let is_action = worker.status == SwarmWorkerStatus::ActionNeeded;
+
+                let mut row_path: *mut c_void = null_mut();
+                GdipCreatePath(0, &mut row_path);
+                if !row_path.is_null() {
+                    add_round_rect_to_path(row_path, row_x, item_y, row_w, row_h, 8.0);
+                    let bg_color = if is_action {
+                        make_argb(36, 255, 149, 0)
+                    } else {
+                        make_argb(22, 255, 255, 255)
+                    };
+                    let mut bg_brush: *mut c_void = null_mut();
+                    GdipCreateSolidFill(bg_color, &mut bg_brush);
+                    if !bg_brush.is_null() {
+                        GdipFillPath(graphics, bg_brush, row_path);
+                        GdipDeleteBrush(bg_brush);
+                    }
+
+                    let stroke_color = if is_action {
+                        make_argb(145, 255, 159, 20)
+                    } else {
+                        make_argb(32, 255, 255, 255)
+                    };
+                    let mut stroke_pen: *mut c_void = null_mut();
+                    GdipCreatePen1(stroke_color, 1.0, UNIT_PIXEL, &mut stroke_pen);
+                    if !stroke_pen.is_null() {
+                        GdipDrawPath(graphics, stroke_pen, row_path);
+                        GdipDeletePen(stroke_pen);
+                    }
+                    GdipDeletePath(row_path);
+                }
+
+                // 左侧 6px 彩色状态灯
+                let dot_x = (row_x + 10.0).round();
+                let dot_y = (item_y + (row_h - 6.0) / 2.0).round();
+                let dot_color = self.swarm_status_color(worker.status, true);
+                self.draw_dot(graphics, dot_x, dot_y, 6.0, dot_color);
+
+                // 右侧对齐步骤/耗时信息
+                let row_meta = Self::format_worker_meta(worker, now);
+                let measured_row_meta_w = Self::measure_text_w(
+                    graphics,
+                    self.font_small,
+                    &row_meta,
+                    self.format_single_line,
+                );
+                let row_meta_w = measured_row_meta_w.clamp(28.0, 132.0).round();
+                let row_meta_x = (row_x + row_w - 10.0 - row_meta_w).round();
+                let text_y = (item_y + (row_h - 18.0) / 2.0).round();
+                let row_meta_color = match worker.status {
+                    SwarmWorkerStatus::ActionNeeded => make_argb(255, 255, 188, 92),
+                    SwarmWorkerStatus::Working => make_argb(225, 145, 208, 245),
+                    SwarmWorkerStatus::Done => make_argb(225, 110, 225, 175),
+                    SwarmWorkerStatus::Waiting => make_argb(165, 165, 175, 190),
+                };
+                self.draw_text_line(
+                    graphics,
+                    self.font_small,
+                    &row_meta,
+                    RectF {
+                        x: row_meta_x,
+                        y: text_y,
+                        width: row_meta_w,
+                        height: 18.0,
+                    },
+                    row_meta_color,
+                );
+
+                // 中间区域：@display_name + 单行 task_summary（右侧严格裁剪至 row_meta_x - 8px）
+                let name_x = (dot_x + 6.0 + 8.0).round();
+                let max_mid_w = (row_meta_x - 8.0 - name_x).max(24.0).round();
+                let raw_name = worker.display_name.trim();
+                let name_label = if raw_name.is_empty() {
+                    "@worker".to_string()
+                } else if raw_name.starts_with('@') {
+                    raw_name.to_string()
+                } else {
+                    format!("@{}", raw_name)
+                };
+                let measured_name_w = Self::measure_text_w(
+                    graphics,
+                    self.font_title,
+                    &name_label,
+                    self.format_single_line,
+                );
+                let name_w = measured_name_w
+                    .clamp(24.0, (max_mid_w * 0.45).max(44.0).min(115.0))
+                    .round();
+                let name_color = match worker.status {
+                    SwarmWorkerStatus::ActionNeeded => make_argb(255, 255, 195, 110),
+                    SwarmWorkerStatus::Working => make_argb(255, 245, 248, 255),
+                    SwarmWorkerStatus::Done => make_argb(235, 185, 235, 210),
+                    SwarmWorkerStatus::Waiting => make_argb(185, 175, 185, 200),
+                };
+                self.draw_text_line(
+                    graphics,
+                    self.font_title,
+                    &name_label,
+                    RectF {
+                        x: name_x,
+                        y: text_y,
+                        width: name_w,
+                        height: 18.0,
+                    },
+                    name_color,
+                );
+
+                let task_x = (name_x + name_w + 8.0).round();
+                let task_w = (row_meta_x - 8.0 - task_x).round();
+                if task_w >= 16.0 {
+                    let task_text = if worker.task_summary.trim().is_empty() {
+                        match worker.status {
+                            SwarmWorkerStatus::Waiting => "等待消息唤醒",
+                            SwarmWorkerStatus::Done => "任务已收官",
+                            SwarmWorkerStatus::ActionNeeded => "等待确认",
+                            SwarmWorkerStatus::Working => "执行中...",
+                        }
+                    } else {
+                        worker.task_summary.trim()
+                    };
+                    let task_color = match worker.status {
+                        SwarmWorkerStatus::ActionNeeded => make_argb(245, 255, 236, 205),
+                        SwarmWorkerStatus::Waiting => make_argb(165, 175, 185, 200),
+                        _ => make_argb(230, 212, 220, 232),
+                    };
+                    self.draw_text_line(
+                        graphics,
+                        self.font_body,
+                        task_text,
+                        RectF {
+                            x: task_x,
+                            y: text_y,
+                            width: task_w,
+                            height: 18.0,
+                        },
+                        task_color,
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl Drop for CapsuleRenderer {
@@ -1253,5 +2348,275 @@ mod tests {
         // Peeking / 无效尺寸防护
         assert!(!CapsuleRenderer::is_action_jump_hit(cap_x, 0.0, cap_w, 4.0, 200.0, 2.0));
         assert!(!CapsuleRenderer::is_action_jump_hit(cap_x, cap_y, 0.0, cap_h, 50.0, 20.0));
+    }
+
+    fn make_test_swarm(group_key: &str, parent_sid: Option<&str>, project: &str, agent: &str, statuses: &[SwarmWorkerStatus]) -> SwarmSummary {
+        let now = Instant::now();
+        let mut workers: Vec<SwarmWorkerInfo> = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, &st)| SwarmWorkerInfo {
+                worker_id: format!("w-{}", i),
+                display_name: format!("@worker_{}", i),
+                role: format!("worker_{}", i),
+                status: st,
+                task_summary: match st {
+                    SwarmWorkerStatus::ActionNeeded => format!("需要确认数据库写入步骤 #{}", i),
+                    SwarmWorkerStatus::Working => format!("正在构建模块 {} 并验证核心单元测试", i),
+                    SwarmWorkerStatus::Done => format!("任务 {} 已完成", i),
+                    SwarmWorkerStatus::Waiting => "待命监控中".to_string(),
+                },
+                step_index: (i as u64 + 1) * 7,
+                started_at: now - std::time::Duration::from_secs(38),
+                last_update: now,
+            })
+            .collect();
+        workers.sort_by_key(|w| w.status.priority_rank());
+
+        let action_count = workers.iter().filter(|w| w.status == SwarmWorkerStatus::ActionNeeded).count();
+        let working_count = workers.iter().filter(|w| w.status == SwarmWorkerStatus::Working).count();
+        let done_count = workers.iter().filter(|w| w.status == SwarmWorkerStatus::Done).count();
+        let waiting_count = workers.iter().filter(|w| w.status == SwarmWorkerStatus::Waiting).count();
+        let aggregate_summary = if action_count > 0 {
+            format!("⚠ {} 待确认 · {} 运行中", action_count, working_count)
+        } else if working_count > 0 {
+            format!("{}/{} 运行中", working_count, workers.len())
+        } else {
+            format!("{}/{} 已完成", done_count, workers.len())
+        };
+
+        SwarmSummary {
+            group_key: group_key.to_string(),
+            parent_session_id: parent_sid.map(|s| s.to_string()),
+            project_name: project.to_string(),
+            agent_name: agent.to_string(),
+            total_workers: workers.len(),
+            working_count,
+            action_count,
+            done_count,
+            waiting_count,
+            workers,
+            aggregate_summary,
+            elapsed_secs: 102,
+        }
+    }
+
+    fn make_test_active_item(session_id: &str, project: &str, agent: &str, swarm: Option<SwarmSummary>) -> ActiveSessionItem {
+        let now = Instant::now();
+        ActiveSessionItem {
+            session_id: session_id.to_string(),
+            project_name: project.to_string(),
+            role_type: "AI 结对助手".to_string(),
+            task_summary: "并发处理任务".to_string(),
+            agent_name: agent.to_string(),
+            step_index: 12,
+            start_time: now,
+            last_update_time: now,
+            swarm,
+        }
+    }
+
+    #[test]
+    fn test_resolve_focused_swarm_priority_and_fallback() {
+        let swarm_a = make_test_swarm("grp-a", Some("parent-a"), "ProjA", "Antigravity", &[SwarmWorkerStatus::Working, SwarmWorkerStatus::Done]);
+        let swarm_b = make_test_swarm("grp-b", None, "ProjB", "Claude", &[SwarmWorkerStatus::ActionNeeded, SwarmWorkerStatus::Working]);
+        let sessions = vec![
+            make_test_active_item("parent-a", "ProjA", "Antigravity", Some(swarm_a)),
+            make_test_active_item("plain-c", "ProjC", "Codex", None),
+            make_test_active_item("grp-b", "ProjB", "Claude", Some(swarm_b)),
+        ];
+        let mut odo = OdometerCarousel::new();
+        odo.active_index = 2;
+
+        // 1. session_id 优先匹配（即使 odometer 当前指向 index 2）
+        let state_sid = IslandState::Working {
+            session_id: "parent-a".into(),
+            project_name: "ProjB".into(),
+            role_type: "Swarm".into(),
+            agent_name: "Claude".into(),
+            task_summary: "...".into(),
+            step_index: 1,
+            start_time: Instant::now(),
+        };
+        let matched = resolve_focused_swarm(&state_sid, &sessions, &odo, EdgeDockMode::Normal).expect("rotation active: odometer focus wins over session_id");
+        assert_eq!(matched.group_key, "grp-b");
+        let matched_exp = resolve_focused_swarm(&state_sid, &sessions, &odo, EdgeDockMode::SwarmExpanded).expect("expanded keeps odometer focus");
+        assert_eq!(matched_exp.group_key, "grp-b");
+        // 轮播当前页无 Swarm：Normal 不命中，SwarmExpanded 回退 session_id 匹配
+        let mut odo_plain = OdometerCarousel::new();
+        odo_plain.active_index = 1;
+        assert!(resolve_focused_swarm(&state_sid, &sessions, &odo_plain, EdgeDockMode::Normal).is_none());
+        let fb = resolve_focused_swarm(&state_sid, &sessions, &odo_plain, EdgeDockMode::SwarmExpanded).expect("fallback by session_id");
+        assert_eq!(fb.group_key, "grp-a");
+
+        // 2. 其次按 (project_name, agent_name) 匹配
+        let state_proj = IslandState::Started {
+            session_id: "unknown-sid".into(),
+            project_name: "ProjB".into(),
+            role_type: "Swarm".into(),
+            agent_name: "Claude".into(),
+            task_summary: "...".into(),
+            started_at: Instant::now(),
+            auto_hide_secs: 1.8,
+        };
+        let matched_proj = resolve_focused_swarm(&state_proj, &sessions, &odo, EdgeDockMode::Normal).expect("rotation active: odometer focus");
+        assert_eq!(matched_proj.group_key, "grp-b");
+
+        // 3. 无匹配单会话不应误命中无关 Swarm；多会话轮播可跟随当前 odometer 焦点
+        let single_unrelated = vec![sessions[0].clone()];
+        let state_other = IslandState::Working {
+            session_id: "other-sid".into(),
+            project_name: "OtherProj".into(),
+            role_type: "Dev".into(),
+            agent_name: "Codex".into(),
+            task_summary: "...".into(),
+            step_index: 1,
+            start_time: Instant::now(),
+        };
+        assert!(resolve_focused_swarm(&state_other, &single_unrelated, &odo, EdgeDockMode::Normal).is_none());
+        let matched_odo = resolve_focused_swarm(&state_other, &sessions, &odo, EdgeDockMode::Normal).expect("multi-session falls back to odometer focus");
+        assert_eq!(matched_odo.group_key, "grp-b");
+
+        // 4. Idle 状态优先当前轮播焦点或首个含 Swarm 条目
+        odo.active_index = 1; // plain-c has swarm: None
+        assert!(resolve_focused_swarm(&IslandState::Idle, &sessions, &odo, EdgeDockMode::Normal).is_none());
+        let matched_idle = resolve_focused_swarm(&IslandState::Idle, &sessions, &odo, EdgeDockMode::SwarmExpanded).expect("expanded idle falls back to first swarm");
+        assert_eq!(matched_idle.group_key, "grp-a");
+    }
+
+    #[test]
+    fn test_capsule_renderer_swarm_normal_and_expanded_smoke() {
+        let _gdip = GdiplusContext::init().expect("GdiplusContext::init should succeed on Windows");
+        let mut renderer = CapsuleRenderer::new();
+
+        let width = 480i32;
+        let height = 210i32;
+        let mut buf = vec![0u8; (width * height * 4) as usize];
+        let mut bmp: *mut c_void = null_mut();
+        let mut gfx: *mut c_void = null_mut();
+
+        unsafe {
+            assert_eq!(
+                GdipCreateBitmapFromScan0(
+                    width,
+                    height,
+                    width * 4,
+                    PIXEL_FORMAT_32BPP_PARGB,
+                    buf.as_mut_ptr(),
+                    &mut bmp,
+                ),
+                0
+            );
+            assert_eq!(GdipGetImageGraphicsContext(bmp, &mut gfx), 0);
+
+            let mut odo = OdometerCarousel::new();
+            let recent = vec![
+                ("s1".into(), "WNoobar".into(), "Swarm".into(), "聚合雷达".into(), "Antigravity".into()),
+            ];
+
+            // Case 1: Normal Swarm (2 workers)
+            let swarm_2 = make_test_swarm(
+                "parent-2",
+                Some("parent-2"),
+                "WNoobar",
+                "Antigravity",
+                &[SwarmWorkerStatus::Working, SwarmWorkerStatus::Done],
+            );
+            let sessions_2 = vec![make_test_active_item("parent-2", "WNoobar", "Antigravity", Some(swarm_2))];
+            let working_2 = IslandState::Working {
+                session_id: "parent-2".into(),
+                project_name: "WNoobar".into(),
+                role_type: "Swarm".into(),
+                agent_name: "Antigravity".into(),
+                task_summary: "running".into(),
+                step_index: 5,
+                start_time: Instant::now(),
+            };
+            renderer.render(gfx, 480.0, 210.0, 400.0, 38.0, &working_2, EdgeDockMode::Normal, &recent, &sessions_2, &odo);
+            assert!(buf.iter().any(|&b| b != 0), "2-worker Normal Swarm should render non-empty pixels");
+
+            // Case 2: Normal Swarm (6 workers -> >4 dots +2 badge) + Started + Odometer rolling
+            let swarm_6 = make_test_swarm(
+                "parent-6",
+                Some("parent-6"),
+                "LongProjectAlpha",
+                "Claude",
+                &[
+                    SwarmWorkerStatus::Working,
+                    SwarmWorkerStatus::Working,
+                    SwarmWorkerStatus::Done,
+                    SwarmWorkerStatus::Done,
+                    SwarmWorkerStatus::Waiting,
+                    SwarmWorkerStatus::Waiting,
+                ],
+            );
+            let sessions_multi = vec![
+                make_test_active_item("parent-6", "LongProjectAlpha", "Claude", Some(swarm_6.clone())),
+                make_test_active_item("solo-1", "SideProject", "Codex", None),
+            ];
+            let started_6 = IslandState::Started {
+                session_id: "parent-6".into(),
+                project_name: "LongProjectAlpha".into(),
+                role_type: "Swarm".into(),
+                agent_name: "Claude".into(),
+                task_summary: "started".into(),
+                started_at: Instant::now(),
+                auto_hide_secs: 1.8,
+            };
+            renderer.render(gfx, 480.0, 210.0, 440.0, 38.0, &started_6, EdgeDockMode::Normal, &recent, &sessions_multi[..1], &odo);
+            odo.is_rolling = true;
+            odo.roll_progress = 0.45;
+            odo.prev_index = 1;
+            odo.active_index = 0;
+            renderer.render(gfx, 480.0, 210.0, 440.0, 38.0, &working_2, EdgeDockMode::Normal, &recent, &sessions_multi, &odo);
+            odo.is_rolling = false;
+
+            // Case 3: Normal Swarm with ActionNeeded (orange glow + amber badge)
+            let swarm_action = make_test_swarm(
+                "parent-act",
+                Some("parent-act"),
+                "WNoobar",
+                "Antigravity",
+                &[
+                    SwarmWorkerStatus::ActionNeeded,
+                    SwarmWorkerStatus::Working,
+                    SwarmWorkerStatus::Done,
+                    SwarmWorkerStatus::Waiting,
+                    SwarmWorkerStatus::Working,
+                    SwarmWorkerStatus::Done,
+                ],
+            );
+            let sessions_act = vec![make_test_active_item("parent-act", "WNoobar", "Antigravity", Some(swarm_action))];
+            let working_act = IslandState::Working {
+                session_id: "parent-act".into(),
+                project_name: "WNoobar".into(),
+                role_type: "Swarm".into(),
+                agent_name: "Antigravity".into(),
+                task_summary: "action".into(),
+                step_index: 9,
+                start_time: Instant::now(),
+            };
+            buf.fill(0);
+            renderer.render(gfx, 480.0, 210.0, 440.0, 38.0, &working_act, EdgeDockMode::Normal, &recent, &sessions_act, &odo);
+            // 32bpp PARGB (B, G, R, A) 应包含琥珀橙色像素 (R > 160, G in 60..200, B < 60)
+            let has_amber_pixel = buf.chunks_exact(4).any(|px| px[3] > 20 && px[2] > 160 && px[1] > 60 && px[0] < 60);
+            assert!(has_amber_pixel, "ActionNeeded Normal Swarm should emit amber glow/dot pixels");
+
+            // Case 4: EdgeDockMode::SwarmExpanded (440 x 190) normal & hovered jump pill
+            buf.fill(0);
+            renderer.is_action_hovered = false;
+            renderer.render(gfx, 480.0, 210.0, 440.0, 190.0, &working_act, EdgeDockMode::SwarmExpanded, &recent, &sessions_act, &odo);
+            assert!(buf.iter().any(|&b| b != 0), "SwarmExpanded should render non-empty pixels");
+            renderer.is_action_hovered = true;
+            renderer.render(gfx, 480.0, 210.0, 440.0, 190.0, &working_act, EdgeDockMode::SwarmExpanded, &recent, &sessions_act, &odo);
+
+            // Case 5: EdgeDockMode::SwarmExpanded graceful fallback to render_deck_view when no SwarmSummary
+            buf.fill(0);
+            renderer.render(gfx, 480.0, 210.0, 440.0, 190.0, &IslandState::Idle, EdgeDockMode::SwarmExpanded, &recent, &[], &odo);
+            assert!(buf.iter().any(|&b| b != 0), "SwarmExpanded fallback to DeckView should still render cleanly");
+
+            GdipDeleteGraphics(gfx);
+            GdipDisposeImage(bmp);
+        }
     }
 }

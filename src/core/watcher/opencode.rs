@@ -12,6 +12,7 @@ use crossbeam_channel::Sender;
 use serde_json::Value;
 
 use crate::core::bus::AgentEvent;
+use crate::core::swarm::SwarmWorkerStatus;
 
 pub struct OpenCodeWatcher {
     storage_dir: PathBuf,
@@ -67,10 +68,31 @@ impl OpenCodeWatcher {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    fn emit_subagent_status(
+        sender: &Sender<AgentEvent>,
+        track: &OpenCodeSessionTrackInfo,
+        parent_id: &str,
+        status: SwarmWorkerStatus,
+        task_summary: String,
+    ) {
+        let _ = sender.send(AgentEvent::SubagentStatus {
+            group_key: parent_id.to_string(),
+            parent_session_id: Some(parent_id.to_string()),
+            worker_id: track.session_id.clone(),
+            worker_name: track.role_type.clone(),
+            project_name: track.project_name.clone(),
+            agent_name: track.agent_name.clone(),
+            status,
+            task_summary,
+            step_index: track.step_count,
+        });
+    }
+
     fn run_loop(storage_dir: PathBuf, sender: Sender<AgentEvent>, running: Arc<AtomicBool>) {
         println!("[Watcher] OpenCode Three-Beat Rhythm Engine active: {:?}", storage_dir);
 
         let mut tracked_sessions: HashMap<String, OpenCodeSessionTrackInfo> = HashMap::new();
+        let mut subagent_parents: HashMap<String, Option<String>> = HashMap::new();
 
         while running.load(Ordering::SeqCst) {
             if storage_dir.exists() {
@@ -81,6 +103,10 @@ impl OpenCodeWatcher {
 
                 for (proj_id, sess_id, sess_file) in active_sessions {
                     let mod_time = sess_file.metadata().and_then(|m| m.modified()).ok();
+                    let parent_id = subagent_parents
+                        .entry(sess_id.clone())
+                        .or_insert_with(|| Self::read_subagent_parent(&sess_file))
+                        .clone();
 
                     let track = tracked_sessions.entry(sess_id.clone()).or_insert_with(|| {
                         let (proj_name, title) = Self::read_session_info(&sess_file, &proj_id);
@@ -121,27 +147,47 @@ impl OpenCodeWatcher {
                                                     track.has_reported_done = false;
                                                     track.last_event_time = Instant::now();
 
-                                                    println!("[Watcher] OpenCode TaskStarted: [{}] - {}", track.project_name, action_desc);
-                                                    let _ = sender.send(AgentEvent::TaskStarted {
-                                                        session_id: track.session_id.clone(),
-                                                        project_name: track.project_name.clone(),
-                                                        role_type: track.role_type.clone(),
-                                                        agent_name: track.agent_name.clone(),
-                                                        task_summary: action_desc,
-                                                    });
-                                                } else if track.is_working {
-                                                    // 2. 【节拍 2：执行静默期】
-                                                    let now = Instant::now();
-                                                    if now.duration_since(track.last_event_time) >= Duration::from_millis(600) {
-                                                        track.last_event_time = now;
-                                                        let _ = sender.send(AgentEvent::Working {
+                                                    if let Some(ref pid) = parent_id {
+                                                        Self::emit_subagent_status(
+                                                            &sender,
+                                                            track,
+                                                            pid,
+                                                            SwarmWorkerStatus::Working,
+                                                            action_desc,
+                                                        );
+                                                    } else {
+                                                        println!("[Watcher] OpenCode TaskStarted: [{}] - {}", track.project_name, action_desc);
+                                                        let _ = sender.send(AgentEvent::TaskStarted {
                                                             session_id: track.session_id.clone(),
                                                             project_name: track.project_name.clone(),
                                                             role_type: track.role_type.clone(),
                                                             agent_name: track.agent_name.clone(),
                                                             task_summary: action_desc,
-                                                            step_index: track.step_count,
                                                         });
+                                                    }
+                                                } else if track.is_working {
+                                                    // 2. 【节拍 2：执行静默期】
+                                                    let now = Instant::now();
+                                                    if now.duration_since(track.last_event_time) >= Duration::from_millis(600) {
+                                                        track.last_event_time = now;
+                                                        if let Some(ref pid) = parent_id {
+                                                            Self::emit_subagent_status(
+                                                                &sender,
+                                                                track,
+                                                                pid,
+                                                                SwarmWorkerStatus::Working,
+                                                                action_desc,
+                                                            );
+                                                        } else {
+                                                            let _ = sender.send(AgentEvent::Working {
+                                                                session_id: track.session_id.clone(),
+                                                                project_name: track.project_name.clone(),
+                                                                role_type: track.role_type.clone(),
+                                                                agent_name: track.agent_name.clone(),
+                                                                task_summary: action_desc,
+                                                                step_index: track.step_count,
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
@@ -163,16 +209,26 @@ impl OpenCodeWatcher {
                                 let summary = format!("OpenCode 任务完成 (共 {} 步)", track.step_count);
                                 let duration = track.last_event_time.elapsed().as_secs().max(1);
 
-                                println!("[Watcher] OpenCode Task Done: [{}] - {}", track.project_name, summary);
-                                let _ = sender.send(AgentEvent::Done {
-                                    session_id: track.session_id.clone(),
-                                    project_name: track.project_name.clone(),
-                                    role_type: track.role_type.clone(),
-                                    agent_name: track.agent_name.clone(),
-                                    summary,
-                                    duration_secs: duration,
-                                    artifacts_count: 0,
-                                });
+                                if let Some(ref pid) = parent_id {
+                                    Self::emit_subagent_status(
+                                        &sender,
+                                        track,
+                                        pid,
+                                        SwarmWorkerStatus::Done,
+                                        summary,
+                                    );
+                                } else {
+                                    println!("[Watcher] OpenCode Task Done: [{}] - {}", track.project_name, summary);
+                                    let _ = sender.send(AgentEvent::Done {
+                                        session_id: track.session_id.clone(),
+                                        project_name: track.project_name.clone(),
+                                        role_type: track.role_type.clone(),
+                                        agent_name: track.agent_name.clone(),
+                                        summary,
+                                        duration_secs: duration,
+                                        artifacts_count: 0,
+                                    });
+                                }
                             }
                         }
                     }
@@ -221,6 +277,20 @@ impl OpenCodeWatcher {
         } else {
             "子智能体 · 协同处理".into()
         }
+    }
+
+    /// 从会话 JSON 提取非空 parentId / parent_id，用于识别 OpenCode 子智能体归并
+    pub fn read_subagent_parent(file_path: &Path) -> Option<String> {
+        let mut f = File::open(file_path).ok()?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).ok()?;
+        let val = serde_json::from_str::<Value>(&s).ok()?;
+        val.get("parentId")
+            .or_else(|| val.get("parent_id"))
+            .and_then(|p| p.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     }
 
     pub fn read_session_info(file_path: &Path, default_proj: &str) -> (String, String) {
@@ -332,6 +402,25 @@ mod tests {
         fs::write(&f4, r#"{"parentId": "parent-123", "agent": "tester", "projectName": "WNoobar"}"#).unwrap();
         let (_, r4) = OpenCodeWatcher::read_session_info(&f4, "default");
         assert_eq!(r4, "子智能体 · 单元测试");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_opencode_read_subagent_parent() {
+        let temp_dir = std::env::temp_dir().join(format!("opencode_parent_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let child = temp_dir.join("child.json");
+        fs::write(&child, r#"{"parentId": "op-parent-42", "agent": "coder"}"#).unwrap();
+        assert_eq!(
+            OpenCodeWatcher::read_subagent_parent(&child).as_deref(),
+            Some("op-parent-42")
+        );
+
+        let main_sess = temp_dir.join("main.json");
+        fs::write(&main_sess, r#"{"parentId": "   ", "title": "Main"}"#).unwrap();
+        assert_eq!(OpenCodeWatcher::read_subagent_parent(&main_sess), None);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

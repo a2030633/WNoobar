@@ -49,9 +49,10 @@ pub enum IslandState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeDockMode {
-    Peeking,      // 贴边隐藏：只露出顶部 2.5px 极细微光条
-    Normal,       // 正常浮动：标准胶囊位置
-    DeckExpanded, // 展开会话抽屉（Session Deck）
+    Peeking,       // 贴边隐藏：只露出顶部 2.5px 极细微光条
+    Normal,        // 正常浮动：标准胶囊位置
+    DeckExpanded,  // 展开会话抽屉（Session Deck）
+    SwarmExpanded, // 展开 Swarm 协同面板
 }
 
 impl IslandState {
@@ -62,7 +63,7 @@ impl IslandState {
     pub fn target_dimensions(&self, dock_mode: EdgeDockMode) -> (f32, f32) {
         match dock_mode {
             EdgeDockMode::Peeking => (140.0, 4.0),
-            EdgeDockMode::DeckExpanded => (440.0, 190.0),
+            EdgeDockMode::DeckExpanded | EdgeDockMode::SwarmExpanded => (440.0, 190.0),
             EdgeDockMode::Normal => match self {
                 IslandState::Idle => (210.0, 32.0),
                 IslandState::Started { project_name, role_type, task_summary, .. } => {
